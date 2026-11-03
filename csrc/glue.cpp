@@ -12,6 +12,7 @@
 //   arrays can be correlated back to application objects.
 
 #include <box3d/box3d.h>
+#include <cfloat>
 #include <cstdint>
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
@@ -257,6 +258,93 @@ static bool overlapFcn( b3ShapeId shapeId, void* context )
 		c->shapes.push_back( shapeId );
 	}
 	return true;
+}
+
+// ---------------------------------------------------------------------------
+// The capsule mover (cast, collide, plane solver)
+// ---------------------------------------------------------------------------
+
+static b3Capsule capsuleFromOpts( const val& o )
+{
+	b3Capsule c;
+	c.center1 = getVec3( o, "center1", b3Vec3_zero );
+	c.center2 = getVec3( o, "center2", b3Vec3_zero );
+	c.radius = getFloat( o, "radius", 0.0f );
+	return c;
+}
+
+static bool moverFilterFcn( b3ShapeId shapeId, void* context )
+{
+	return *(bool*)context || !b3Shape_IsSensor( shapeId );
+}
+
+struct PlaneContext
+{
+	bool includeSensors;
+	val out;
+	int count;
+};
+
+static bool planeFcn( b3ShapeId shapeId, const b3PlaneResult* planes, int planeCount, void* context )
+{
+	PlaneContext* c = (PlaneContext*)context;
+	if ( !c->includeSensors && b3Shape_IsSensor( shapeId ) )
+	{
+		return true;
+	}
+	for ( int i = 0; i < planeCount; ++i )
+	{
+		val o = val::object();
+		o.set( "normal", fromVec3( planes[i].plane.normal ) );
+		o.set( "offset", planes[i].plane.offset );
+		o.set( "point", fromVec3( planes[i].point ) );
+		setHitShape( o, shapeId );
+		c->out.set( c->count++, o );
+	}
+	return true;
+}
+
+// Planes from { normal, offset, pushLimit (default FLT_MAX: rigid), clipVelocity (default true) }.
+static std::vector<b3CollisionPlane> planesFromArray( const val& arr )
+{
+	int n = arr["length"].as<int>();
+	std::vector<b3CollisionPlane> planes( n );
+	for ( int i = 0; i < n; ++i )
+	{
+		val p = arr[i];
+		planes[i].plane.normal = getVec3( p, "normal", b3Vec3_zero );
+		planes[i].plane.offset = getFloat( p, "offset", 0.0f );
+		planes[i].pushLimit = getFloat( p, "pushLimit", FLT_MAX );
+		planes[i].push = getFloat( p, "push", 0.0f );
+		planes[i].clipVelocity = getBool( p, "clipVelocity", true );
+	}
+	return planes;
+}
+
+// The mover's plane solver: the move closest to targetDelta that respects the planes (b3SolvePlanes). It also
+// returns each plane's push, which clipVector reads (a plane that did not push does not clip).
+static val solvePlanes( val targetDelta, val planesArr )
+{
+	std::vector<b3CollisionPlane> planes = planesFromArray( planesArr );
+	b3PlaneSolverResult r = b3SolvePlanes( toVec3( targetDelta, b3Vec3_zero ), planes.data(), (int)planes.size() );
+	val o = val::object();
+	o.set( "delta", fromVec3( r.delta ) );
+	o.set( "iterationCount", r.iterationCount );
+	val push = val::array();
+	for ( size_t i = 0; i < planes.size(); ++i )
+	{
+		push.set( i, planes[i].push );
+	}
+	o.set( "push", push );
+	return o;
+}
+
+// A velocity clipped against the planes that pushed and have clipVelocity (b3ClipVector): pass each plane's push
+// from solvePlanes.
+static val clipVector( val vector, val planesArr )
+{
+	std::vector<b3CollisionPlane> planes = planesFromArray( planesArr );
+	return fromVec3( b3ClipVector( toVec3( vector, b3Vec3_zero ), planes.data(), (int)planes.size() ) );
 }
 
 static b3ShapeDef shapeDefFromOpts( const val& o )
@@ -1715,6 +1803,26 @@ struct World
 		return o;
 	}
 
+	// The fraction of translation a capsule mover ({ center1, center2, radius }, relative to origin) can travel
+	// (b3World_CastMover). Shapes it already overlaps are ignored, as are sensors unless filterOpts.includeSensors.
+	float castMover( val origin, val capsuleOpts, val translation, val filterOpts ) const
+	{
+		b3Capsule mover = capsuleFromOpts( capsuleOpts );
+		bool includeSensors = includeSensorsOf( filterOpts );
+		return b3World_CastMover( id, toVec3( origin, b3Vec3_zero ), &mover, toVec3( translation, b3Vec3_zero ),
+								  queryFilterFromOpts( filterOpts ), moverFilterFcn, &includeSensors );
+	}
+
+	// The collision planes of a capsule mover (b3World_CollideMover), relative to origin: an array of
+	// { normal, offset, point, bodyIndex, bodyUserData, shapeUserData }, for solvePlanes.
+	val collideMover( val origin, val capsuleOpts, val filterOpts ) const
+	{
+		b3Capsule mover = capsuleFromOpts( capsuleOpts );
+		PlaneContext c = { includeSensorsOf( filterOpts ), val::array(), 0 };
+		b3World_CollideMover( id, toVec3( origin, b3Vec3_zero ), &mover, queryFilterFromOpts( filterOpts ), planeFcn, &c );
+		return c.out;
+	}
+
 	void explode( val opts )
 	{
 		b3ExplosionDef def = b3DefaultExplosionDef();
@@ -1849,6 +1957,8 @@ EMSCRIPTEN_BINDINGS( box3d )
 	constant( "threaded", false );
 #endif
 	constant( "maxWorkers", (int)B3_MAX_WORKERS );
+	function( "solvePlanes", &solvePlanes );
+	function( "clipVector", &clipVector );
 
 	class_<World>( "World" )
 		.constructor<>()
@@ -1877,6 +1987,8 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "castShape", &World::castShape )
 		.function( "overlapShape", &World::overlapShape )
 		.function( "closestPoint", &World::closestPoint )
+		.function( "castMover", &World::castMover )
+		.function( "collideMover", &World::collideMover )
 		.function( "explode", &World::explode )
 		.function( "getBodyEvents", &World::getBodyEvents )
 		.function( "getContactEvents", &World::getContactEvents )
