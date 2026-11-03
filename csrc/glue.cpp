@@ -1444,6 +1444,8 @@ static void applyJointBase( b3JointDef* base, const Body& a, const Body& b, cons
 struct World
 {
 	b3WorldId id;
+	// Set after restore(): the replay player that owns the restored world.
+	b3RecPlayer* player = nullptr;
 
 	World()
 		: World( val::undefined() )
@@ -1487,8 +1489,53 @@ struct World
 
 	void destroy()
 	{
-		b3DestroyWorld( id );
+		if ( player != nullptr )
+		{
+			b3RecPlayer_Destroy( player );
+			player = nullptr;
+		}
+		else
+		{
+			b3DestroyWorld( id );
+		}
 		id = b3_nullWorldId;
+	}
+
+	// Snapshot. save() returns the world's state as bytes: a recording started and stopped at once holds only its
+	// seed snapshot. restore(bytes) replaces this world with one restored from them, owned by a replay player, and
+	// returns false (leaving the world as it was) when the bytes are refused. Body and shape ids (index and
+	// generation) are the same in the restored world; handles are rebuilt with getBody. User data is not restored.
+	val save() const
+	{
+		b3Recording* recording = b3CreateRecording( 0 );
+		b3World_StartRecording( id, recording );
+		b3World_StopRecording( id );
+		int size = b3Recording_GetSize( recording );
+		val bytes = val::global( "Uint8Array" ).new_( size );
+		bytes.call<void>( "set", val( emscripten::typed_memory_view( size, b3Recording_GetData( recording ) ) ) );
+		b3DestroyRecording( recording );
+		return bytes;
+	}
+
+	bool restore( val bytes )
+	{
+		std::vector<uint8_t> data = emscripten::convertJSArrayToNumberVector<uint8_t>( bytes );
+		b3RecPlayer* restored = b3RecPlayer_Create( data.data(), (int)data.size(), 1 );
+		if ( restored == nullptr )
+		{
+			return false;
+		}
+		destroy();
+		player = restored;
+		id = b3RecPlayer_GetWorldId( restored );
+		return true;
+	}
+
+	Body getBody( int index, int generation ) const
+	{
+		Body body;
+		body.id = { index, (uint16_t)( id.index1 - 1 ), (uint16_t)generation };
+		return body;
 	}
 
 	void step( float timeStep, int subStepCount )
@@ -2046,6 +2093,9 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.constructor<val>()
 		.function( "isValid", &World::isValid )
 		.function( "destroy", &World::destroy )
+		.function( "save", &World::save )
+		.function( "restore", &World::restore )
+		.function( "getBody", &World::getBody )
 		.function( "step", &World::step )
 		.function( "getGravity", &World::getGravity )
 		.function( "setGravity", &World::setGravity )
