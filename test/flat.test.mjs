@@ -303,3 +303,18 @@ test('flat calls: a count whose words pass 2^32 gives nothing (the bound is not 
   assert.equal(world.moverBatch(214748365), 0);
   world.destroy();
 });
+
+test('flat buffers: never at address 0; a mover record asking for 2^32 - 1 rounds runs at most 64', () => {
+  assert.ok(b3.flatIn(0) > 0);
+  assert.ok(b3.flatOut() > 0);
+  const world = new b3.World({ gravity: { x: 0, y: -10, z: 0 } });
+  const floor = world.createBody({ type: 'static', position: { x: 0, y: -0.5, z: 0 } });
+  floor.createBox({ halfExtents: { x: 10, y: 0.5, z: 10 } });
+  // A move into the floor that never settles below 1e-4 a round would run every round it is allowed.
+  writeIn([[U(0), U(0), 0, 0.81, 0, 0, -0.5, 0, 0, 0.5, 0, 0.3, 3, -2, 1, 0, U(0), U(0xffffffff), U(0), U(0)]]);
+  const t0 = performance.now();
+  assert.equal(world.moverBatch(1), 1);
+  assert.ok(out(4).u[3] <= 64, 'rounds run');
+  assert.ok(performance.now() - t0 < 1000);
+  world.destroy();
+});

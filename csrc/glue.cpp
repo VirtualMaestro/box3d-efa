@@ -394,8 +394,13 @@ union FlatWord
 
 static std::vector<FlatWord> g_flatIn, g_flatOut;
 
+// Never address 0: an empty buffer still gets storage, so JS never reads or writes at the null page.
 static int flatIn( int words )
 {
+	if ( words < 1 )
+	{
+		words = 1;
+	}
 	if ( words > (int)g_flatIn.size() )
 	{
 		g_flatIn.resize( words );
@@ -405,6 +410,10 @@ static int flatIn( int words )
 
 static int flatOut()
 {
+	if ( g_flatOut.capacity() == 0 )
+	{
+		g_flatOut.reserve( 16 );
+	}
 	return (int)(uintptr_t)g_flatOut.data();
 }
 
@@ -2501,7 +2510,7 @@ struct World
 	//     at unit length, the offset kept), bit 1 include sensors, bit 2 word 16 holds the mask bits
 	//   2-4 the capsule's position, 5-7 and 8-10 its centers (relative to the position), 11 its radius (floats)
 	//   12-14 the translation (move, cast), 15 the least normal y (move with bit 0, ground), floats
-	//   16 the mask bits, the low 32; 17 a move's most rounds (0: 5); 18, 19 unused
+	//   16 the mask bits, the low 32; 17 a move's most rounds (0: 5; at most 64); 18, 19 unused
 	// A move aims at the position plus the translation; each round solves the planes for what is left, casts that
 	// and moves by the fraction cast; it stops when a round moves less than 1e-4. The positions are kept in doubles
 	// between rounds, as a JS loop over the object calls keeps them; the inputs and outputs are float32 words, so a
@@ -2534,7 +2543,8 @@ struct World
 			float minY = r[15].f;
 			if ( kind == 0 )
 			{
-				int rounds = r[17].u == 0 ? 5 : (int)r[17].u, run = 0;
+				// At most 64 rounds: a word of 2^32 - 1 would hold the call for minutes (review of 2026-11-03).
+				int rounds = r[17].u == 0 ? 5 : r[17].u > 64 ? 64 : (int)r[17].u, run = 0;
 				double px = at.x, py = at.y, pz = at.z;
 				double tx = px + along.x, ty = py + along.y, tz = pz + along.z;
 				while ( run < rounds )
