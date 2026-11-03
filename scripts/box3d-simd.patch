@@ -1,0 +1,15 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -198,7 +198,10 @@ elseif (APPLE)
+ 	target_compile_options(box3d PRIVATE -Wmissing-prototypes -Wall -Wextra -pedantic)
+ elseif (EMSCRIPTEN)
+ 	message(STATUS "Box3D on Emscripten")
+-	target_compile_options(box3d PRIVATE -msimd128 -msse2)
++	# No wasm SIMD when BOX3D_DISABLE_SIMD (the scalar and legacy flavours), as upstream Box3D HEAD does.
++	if (NOT BOX3D_DISABLE_SIMD)
++		target_compile_options(box3d PRIVATE -msimd128 -msse2)
++	endif()
+ elseif (UNIX)
+ 	message(STATUS "Box3D using Unix")
+ 	target_compile_options(box3d PRIVATE -Wmissing-prototypes -Wall -Wextra -pedantic -Wno-unused-value)

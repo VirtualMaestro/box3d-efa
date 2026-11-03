@@ -1,5 +1,33 @@
 # box3d-wasm
 
+## This fork
+
+This is a fork of [monteslu/box3d-wasm](https://github.com/monteslu/box3d-wasm). Its default branch `efa` is the
+Box3D binding used by the physics adapter of the EFA project (a data-oriented TypeScript ECS). It adds to the embind
+glue (`csrc/glue.cpp`; Box3D's C code is not changed):
+
+| JS | C |
+|---|---|
+| `World.castRay(origin, translation, filter)` | `b3World_CastRay` (closest hit, names the body by index) |
+| `World.castShape(origin, { points, radius }, translation, filter)` | `b3World_CastShape` (closest hit) |
+| `World.overlapShape(origin, { points, radius }, filter)` | `b3World_OverlapShape` (every shape) |
+| `World.closestPoint(target, maxDistance, filter)`, `Shape.getClosestPoint(target)` | an overlap, then `b3Shape_GetClosestPoint` |
+| `World.castMover`, `World.collideMover`, `solvePlanes`, `clipVector` | `b3World_CastMover`, `b3World_CollideMover`, `b3SolvePlanes`, `b3ClipVector` |
+| `Body.createMesh({ vertices, indices })` | `b3CreateMesh`, `b3CreateMeshShape` |
+| `Body.createHeightField({ heights, countX, countZ, scale, ... })` | `b3CreateHeightField`, `b3CreateHeightFieldShape` |
+| `World.getBodyMoveEvents()` | `b3World_GetBodyEvents` as typed arrays (`bodyIndex`, `userData`, `transform`, `fellAsleep`) |
+| `World.save()`, `World.restore(bytes)`, `World.getBody(index, generation)`, `Body.getIndex()`, `Body.getGeneration()` | `b3World_StartRecording`, `b3World_StopRecording`, `b3RecPlayer_Create` |
+| `World.getJointEvents()`, `Joint.setForceThreshold`, `Joint.setTorqueThreshold`, `Joint.getIndex()` | `b3World_GetJointEvents`, `b3Joint_SetForceThreshold`, `b3Joint_SetTorqueThreshold` |
+| `Shape.getContactData()` | `b3Shape_GetContactCapacity`, `b3Shape_GetContactData` |
+
+World queries leave sensor shapes out unless the filter has `includeSensors: true`. `scripts/build.sh` also has the
+opt-in flavours `scalar` (no wasm SIMD) and `legacy` (scalar, WebAssembly MVP, no BigInt; needs emsdk 3.1.74):
+`FLAVOURS="standard scalar" npm run build`. `npm run fetch-deps` applies `scripts/box3d-simd.patch` to the pinned
+Box3D, so the scalar flavours carry no SIMD; the Box3D pin is unchanged.
+
+Each feature also sits on its own `pr/*` branch against upstream `main` (`2f2f97ae`), built and tested alone.
+`main` stays equal to upstream.
+
 [![npm version](https://img.shields.io/npm/v/box3d-wasm.svg)](https://www.npmjs.com/package/box3d-wasm)
 [![CI](https://github.com/monteslu/box3d-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/monteslu/box3d-wasm/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/box3d-wasm.svg)](LICENSE)
