@@ -98,6 +98,11 @@ EM_JS( EM_VAL, b3g_transform, ( float px, float py, float pz, float qx, float qy
 	return Emval.toHandle( { position: { x: px, y: py, z: pz }, rotation: { x: qx, y: qy, z: qz, w: qw } } );
 } );
 
+// A method called on a destroyed body, shape or joint (or one of a destroyed world) throws (Guarded below).
+EM_JS( void, b3g_stale, ( int kind ), {
+	throw new Error( 'box3d: a ' + [ 'Body', 'Shape', 'Joint' ][ kind ] + ' handle used after its object or its world was destroyed' );
+} );
+
 // clang-format on
 
 static EM_VAL keyHandle( const char* key )
@@ -578,20 +583,72 @@ static b3ShapeDef shapeDefFromOpts( const val& o )
 // Wrappers
 // ---------------------------------------------------------------------------
 
+// The generation of the world in each slot, as the glue made or restored it. A handle keeps the generation of the
+// world it was made in, so a handle of a destroyed world is told apart from one of the world that took its slot (a
+// body or shape id names its world by slot only).
+static uint16_t g_worldGen[B3_MAX_WORLDS];
+
+static uint16_t worldGenOf( uint16_t world0 )
+{
+	return world0 < B3_MAX_WORLDS ? g_worldGen[world0] : 0;
+}
+
+static bool worldLive( uint16_t world0, uint16_t generation )
+{
+	return b3World_IsValid( { (uint16_t)( world0 + 1 ), generation } );
+}
+
+// Every method of a Body, Shape or Joint handle except isValid, destroy, getIndex and getGeneration runs through
+// Guarded<&Class::method>::call (EMSCRIPTEN_BINDINGS): the handle's check(), then the method. Box3D checks ids only in
+// debug builds; a stale id read or wrote whatever held its slot (review of 2026-11-03).
+template <auto M> struct Guarded;
+
+template <typename C, typename R, typename... A, R ( C::*M )( A... )> struct Guarded<M>
+{
+	static R call( C& self, A... a )
+	{
+		self.check();
+		return ( self.*M )( a... );
+	}
+};
+
+template <typename C, typename R, typename... A, R ( C::*M )( A... ) const> struct Guarded<M>
+{
+	static R call( const C& self, A... a )
+	{
+		self.check();
+		return ( self.*M )( a... );
+	}
+};
+
 struct Shape
 {
 	b3ShapeId id;
+	uint16_t worldGen = worldGenOf( id.world0 );
+
+	void stamp()
+	{
+		worldGen = worldGenOf( id.world0 );
+	}
 
 	bool isValid() const
 	{
-		return b3Shape_IsValid( id );
+		return worldLive( id.world0, worldGen ) && b3Shape_IsValid( id );
+	}
+
+	void check() const
+	{
+		if ( !isValid() )
+		{
+			b3g_stale( 1 );
+		}
 	}
 
 	// A second destroy (or one after the body went) does nothing: Box3D checks ids only in debug builds, and a stale id
 	// writes into whatever now holds its slot.
 	void destroy( bool updateBodyMass )
 	{
-		if ( b3Shape_IsValid( id ) )
+		if ( isValid() )
 		{
 			b3DestroyShape( id, updateBodyMass );
 		}
@@ -776,16 +833,30 @@ struct Shape
 struct Joint
 {
 	b3JointId id;
+	uint16_t worldGen = worldGenOf( id.world0 );
+
+	void stamp()
+	{
+		worldGen = worldGenOf( id.world0 );
+	}
 
 	bool isValid() const
 	{
-		return b3Joint_IsValid( id );
+		return worldLive( id.world0, worldGen ) && b3Joint_IsValid( id );
+	}
+
+	void check() const
+	{
+		if ( !isValid() )
+		{
+			b3g_stale( 2 );
+		}
 	}
 
 	// A second destroy (or one after a body took the joint along) does nothing, as for shapes.
 	void destroy( bool wakeAttached )
 	{
-		if ( b3Joint_IsValid( id ) )
+		if ( isValid() )
 		{
 			b3DestroyJoint( id, wakeAttached );
 		}
@@ -1232,16 +1303,30 @@ struct FilterJoint : Joint
 struct Body
 {
 	b3BodyId id;
+	uint16_t worldGen = worldGenOf( id.world0 );
+
+	void stamp()
+	{
+		worldGen = worldGenOf( id.world0 );
+	}
 
 	bool isValid() const
 	{
-		return b3Body_IsValid( id );
+		return worldLive( id.world0, worldGen ) && b3Body_IsValid( id );
+	}
+
+	void check() const
+	{
+		if ( !isValid() )
+		{
+			b3g_stale( 0 );
+		}
 	}
 
 	// A second destroy does nothing, as for shapes: before, it destroyed whatever held slot 0 of world 0.
 	void destroy()
 	{
-		if ( b3Body_IsValid( id ) )
+		if ( isValid() )
 		{
 			b3DestroyBody( id );
 		}
@@ -1755,6 +1840,7 @@ struct World
 #endif
 		}
 		id = b3CreateWorld( &def );
+		g_worldGen[id.index1 - 1] = id.generation;
 	}
 
 	bool isValid() const
@@ -1803,6 +1889,7 @@ struct World
 		destroy();
 		player = restored;
 		id = b3RecPlayer_GetWorldId( restored );
+		g_worldGen[id.index1 - 1] = id.generation;
 		return true;
 	}
 
@@ -1810,6 +1897,7 @@ struct World
 	{
 		Body body;
 		body.id = { index, (uint16_t)( id.index1 - 1 ), (uint16_t)generation };
+		body.stamp();
 		return body;
 	}
 
@@ -1929,6 +2017,7 @@ struct World
 		def.motorSpeed = getFloat( opts, "motorSpeed", def.motorSpeed );
 		DistanceJoint joint;
 		joint.id = b3CreateDistanceJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -1948,6 +2037,7 @@ struct World
 		def.motorSpeed = getFloat( opts, "motorSpeed", def.motorSpeed );
 		RevoluteJoint joint;
 		joint.id = b3CreateRevoluteJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -1969,6 +2059,7 @@ struct World
 		def.motorVelocity = getVec3( opts, "motorVelocity", def.motorVelocity );
 		SphericalJoint joint;
 		joint.id = b3CreateSphericalJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -1988,6 +2079,7 @@ struct World
 		def.motorSpeed = getFloat( opts, "motorSpeed", def.motorSpeed );
 		PrismaticJoint joint;
 		joint.id = b3CreatePrismaticJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -2001,6 +2093,7 @@ struct World
 		def.angularDampingRatio = getFloat( opts, "angularDampingRatio", def.angularDampingRatio );
 		WeldJoint joint;
 		joint.id = b3CreateWeldJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -2020,6 +2113,7 @@ struct World
 		def.maxSpringTorque = getFloat( opts, "maxSpringTorque", def.maxSpringTorque );
 		MotorJoint joint;
 		joint.id = b3CreateMotorJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -2046,6 +2140,7 @@ struct World
 		def.upperSteeringLimit = getFloat( opts, "upperSteeringLimit", def.upperSteeringLimit );
 		WheelJoint joint;
 		joint.id = b3CreateWheelJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -2058,6 +2153,7 @@ struct World
 		def.maxTorque = getFloat( opts, "maxTorque", def.maxTorque );
 		ParallelJoint joint;
 		joint.id = b3CreateParallelJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -2067,6 +2163,7 @@ struct World
 		applyJointBase( &def.base, a, b, opts );
 		FilterJoint joint;
 		joint.id = b3CreateFilterJoint( id, &def );
+		joint.stamp();
 		return joint;
 	}
 
@@ -2237,14 +2334,21 @@ struct World
 
 	// The bodies that moved in the last step (b3World_GetBodyEvents) with their velocities, 16 words each at flatOut:
 	// index, generation, position (3 floats), rotation (x y z w), linear velocity (3), angular velocity (3), fell
-	// asleep (0 or 1). Returns the bodies.
+	// asleep (0 or 1). A body destroyed since the step is left out. Returns the bodies written.
 	int readMoved() const
 	{
 		g_flatOut.clear();
 		b3BodyEvents events = b3World_GetBodyEvents( id );
+		int written = 0;
 		for ( int i = 0; i < events.moveCount; ++i )
 		{
 			const b3BodyMoveEvent& e = events.moveEvents[i];
+			// Its velocities come from the body: one destroyed after the step (or its slot reused) has none to give.
+			if ( !b3Body_IsValid( e.bodyId ) )
+			{
+				continue;
+			}
+			++written;
 			b3Vec3 v = b3Body_GetLinearVelocity( e.bodyId ), w = b3Body_GetAngularVelocity( e.bodyId );
 			putBody( e.bodyId );
 			putF( (float)e.transform.p.x );
@@ -2262,7 +2366,7 @@ struct World
 			putF( w.z );
 			putU( e.fellAsleep ? 1 : 0 );
 		}
-		return events.moveCount;
+		return written;
 	}
 
 	// The contact and sensor events of the last step, 10 words each at flatOut: kind (1 contact begin, 2 contact
@@ -2400,7 +2504,9 @@ struct World
 	//   16 the mask bits, the low 32; 17 a move's most rounds (0: 5); 18, 19 unused
 	// A move aims at the position plus the translation; each round solves the planes for what is left, casts that
 	// and moves by the fraction cast; it stops when a round moves less than 1e-4. The positions are kept in doubles
-	// between rounds, as a JS loop over the object calls keeps them.
+	// between rounds, as a JS loop over the object calls keeps them; the inputs and outputs are float32 words, so a
+	// caller that keeps positions in doubles rounds them once a call, and the least normal y (word 15) is a float32:
+	// compare against Math.fround(Math.cos(slope)) in a JS path that must agree with this one.
 	// Results, 4 words each at flatOut: move: the end position (3 floats) and the rounds run; cast: the fraction, then
 	// zeros; ground: found (0 or 1), the body's index and generation, the normal's y (float). Returns the records
 	// answered; a record of an unknown kind ends the batch there.
@@ -2738,192 +2844,192 @@ EMSCRIPTEN_BINDINGS( box3d )
 	class_<Body>( "Body" )
 		.function( "isValid", &Body::isValid )
 		.function( "destroy", &Body::destroy )
-		.function( "getType", &Body::getType )
-		.function( "setType", &Body::setType )
-		.function( "getName", &Body::getName )
-		.function( "setName", &Body::setName )
-		.function( "getUserData", &Body::getUserData )
-		.function( "setUserData", &Body::setUserData )
+		.function( "getType", &Guarded<&Body::getType>::call )
+		.function( "setType", &Guarded<&Body::setType>::call )
+		.function( "getName", &Guarded<&Body::getName>::call )
+		.function( "setName", &Guarded<&Body::setName>::call )
+		.function( "getUserData", &Guarded<&Body::getUserData>::call )
+		.function( "setUserData", &Guarded<&Body::setUserData>::call )
 		.function( "getIndex", &Body::getIndex )
 		.function( "getGeneration", &Body::getGeneration )
-		.function( "getPosition", &Body::getPosition )
-		.function( "getRotation", &Body::getRotation )
-		.function( "getTransform", &Body::getTransform )
-		.function( "setTransform", &Body::setTransform )
-		.function( "setTargetTransform", &Body::setTargetTransform )
-		.function( "getLinearVelocity", &Body::getLinearVelocity )
-		.function( "setLinearVelocity", &Body::setLinearVelocity )
-		.function( "getAngularVelocity", &Body::getAngularVelocity )
-		.function( "setAngularVelocity", &Body::setAngularVelocity )
-		.function( "applyForce", &Body::applyForce )
-		.function( "applyForceToCenter", &Body::applyForceToCenter )
-		.function( "applyTorque", &Body::applyTorque )
-		.function( "applyLinearImpulse", &Body::applyLinearImpulse )
-		.function( "applyLinearImpulseToCenter", &Body::applyLinearImpulseToCenter )
-		.function( "applyAngularImpulse", &Body::applyAngularImpulse )
-		.function( "getMass", &Body::getMass )
-		.function( "applyMassFromShapes", &Body::applyMassFromShapes )
-		.function( "getLocalCenterOfMass", &Body::getLocalCenterOfMass )
-		.function( "getWorldCenterOfMass", &Body::getWorldCenterOfMass )
-		.function( "getLocalPoint", &Body::getLocalPoint )
-		.function( "getWorldPoint", &Body::getWorldPoint )
-		.function( "getLinearDamping", &Body::getLinearDamping )
-		.function( "setLinearDamping", &Body::setLinearDamping )
-		.function( "getAngularDamping", &Body::getAngularDamping )
-		.function( "setAngularDamping", &Body::setAngularDamping )
-		.function( "getGravityScale", &Body::getGravityScale )
-		.function( "setGravityScale", &Body::setGravityScale )
-		.function( "isAwake", &Body::isAwake )
-		.function( "setAwake", &Body::setAwake )
-		.function( "enableSleep", &Body::enableSleep )
-		.function( "isEnabled", &Body::isEnabled )
-		.function( "setEnabled", &Body::setEnabled )
-		.function( "isBullet", &Body::isBullet )
-		.function( "setBullet", &Body::setBullet )
-		.function( "setMotionLocks", &Body::setMotionLocks )
-		.function( "getMotionLocks", &Body::getMotionLocks )
-		.function( "getShapeCount", &Body::getShapeCount )
-		.function( "computeAABB", &Body::computeAABB )
-		.function( "createHeightField", &Body::createHeightField )
-		.function( "createSphere", &Body::createSphere )
-		.function( "createCapsule", &Body::createCapsule )
-		.function( "createBox", &Body::createBox )
-		.function( "createHull", &Body::createHull )
-		.function( "createMesh", &Body::createMesh );
+		.function( "getPosition", &Guarded<&Body::getPosition>::call )
+		.function( "getRotation", &Guarded<&Body::getRotation>::call )
+		.function( "getTransform", &Guarded<&Body::getTransform>::call )
+		.function( "setTransform", &Guarded<&Body::setTransform>::call )
+		.function( "setTargetTransform", &Guarded<&Body::setTargetTransform>::call )
+		.function( "getLinearVelocity", &Guarded<&Body::getLinearVelocity>::call )
+		.function( "setLinearVelocity", &Guarded<&Body::setLinearVelocity>::call )
+		.function( "getAngularVelocity", &Guarded<&Body::getAngularVelocity>::call )
+		.function( "setAngularVelocity", &Guarded<&Body::setAngularVelocity>::call )
+		.function( "applyForce", &Guarded<&Body::applyForce>::call )
+		.function( "applyForceToCenter", &Guarded<&Body::applyForceToCenter>::call )
+		.function( "applyTorque", &Guarded<&Body::applyTorque>::call )
+		.function( "applyLinearImpulse", &Guarded<&Body::applyLinearImpulse>::call )
+		.function( "applyLinearImpulseToCenter", &Guarded<&Body::applyLinearImpulseToCenter>::call )
+		.function( "applyAngularImpulse", &Guarded<&Body::applyAngularImpulse>::call )
+		.function( "getMass", &Guarded<&Body::getMass>::call )
+		.function( "applyMassFromShapes", &Guarded<&Body::applyMassFromShapes>::call )
+		.function( "getLocalCenterOfMass", &Guarded<&Body::getLocalCenterOfMass>::call )
+		.function( "getWorldCenterOfMass", &Guarded<&Body::getWorldCenterOfMass>::call )
+		.function( "getLocalPoint", &Guarded<&Body::getLocalPoint>::call )
+		.function( "getWorldPoint", &Guarded<&Body::getWorldPoint>::call )
+		.function( "getLinearDamping", &Guarded<&Body::getLinearDamping>::call )
+		.function( "setLinearDamping", &Guarded<&Body::setLinearDamping>::call )
+		.function( "getAngularDamping", &Guarded<&Body::getAngularDamping>::call )
+		.function( "setAngularDamping", &Guarded<&Body::setAngularDamping>::call )
+		.function( "getGravityScale", &Guarded<&Body::getGravityScale>::call )
+		.function( "setGravityScale", &Guarded<&Body::setGravityScale>::call )
+		.function( "isAwake", &Guarded<&Body::isAwake>::call )
+		.function( "setAwake", &Guarded<&Body::setAwake>::call )
+		.function( "enableSleep", &Guarded<&Body::enableSleep>::call )
+		.function( "isEnabled", &Guarded<&Body::isEnabled>::call )
+		.function( "setEnabled", &Guarded<&Body::setEnabled>::call )
+		.function( "isBullet", &Guarded<&Body::isBullet>::call )
+		.function( "setBullet", &Guarded<&Body::setBullet>::call )
+		.function( "setMotionLocks", &Guarded<&Body::setMotionLocks>::call )
+		.function( "getMotionLocks", &Guarded<&Body::getMotionLocks>::call )
+		.function( "getShapeCount", &Guarded<&Body::getShapeCount>::call )
+		.function( "computeAABB", &Guarded<&Body::computeAABB>::call )
+		.function( "createHeightField", &Guarded<&Body::createHeightField>::call )
+		.function( "createSphere", &Guarded<&Body::createSphere>::call )
+		.function( "createCapsule", &Guarded<&Body::createCapsule>::call )
+		.function( "createBox", &Guarded<&Body::createBox>::call )
+		.function( "createHull", &Guarded<&Body::createHull>::call )
+		.function( "createMesh", &Guarded<&Body::createMesh>::call );
 
 	class_<Shape>( "Shape" )
 		.function( "isValid", &Shape::isValid )
 		.function( "destroy", &Shape::destroy )
-		.function( "getType", &Shape::getType )
-		.function( "getUserData", &Shape::getUserData )
-		.function( "setUserData", &Shape::setUserData )
-		.function( "getFriction", &Shape::getFriction )
-		.function( "setFriction", &Shape::setFriction )
-		.function( "getRestitution", &Shape::getRestitution )
-		.function( "setRestitution", &Shape::setRestitution )
-		.function( "getDensity", &Shape::getDensity )
-		.function( "setDensity", &Shape::setDensity )
-		.function( "isSensor", &Shape::isSensor )
-		.function( "enableSensorEvents", &Shape::enableSensorEvents )
-		.function( "enableContactEvents", &Shape::enableContactEvents )
-		.function( "getContactData", &Shape::getContactData )
-		.function( "enableHitEvents", &Shape::enableHitEvents )
-		.function( "getFilter", &Shape::getFilter )
-		.function( "setFilter", &Shape::setFilter )
-		.function( "getAABB", &Shape::getAABB )
-		.function( "getClosestPoint", &Shape::getClosestPoint )
-		.function( "rayCast", &Shape::rayCast );
+		.function( "getType", &Guarded<&Shape::getType>::call )
+		.function( "getUserData", &Guarded<&Shape::getUserData>::call )
+		.function( "setUserData", &Guarded<&Shape::setUserData>::call )
+		.function( "getFriction", &Guarded<&Shape::getFriction>::call )
+		.function( "setFriction", &Guarded<&Shape::setFriction>::call )
+		.function( "getRestitution", &Guarded<&Shape::getRestitution>::call )
+		.function( "setRestitution", &Guarded<&Shape::setRestitution>::call )
+		.function( "getDensity", &Guarded<&Shape::getDensity>::call )
+		.function( "setDensity", &Guarded<&Shape::setDensity>::call )
+		.function( "isSensor", &Guarded<&Shape::isSensor>::call )
+		.function( "enableSensorEvents", &Guarded<&Shape::enableSensorEvents>::call )
+		.function( "enableContactEvents", &Guarded<&Shape::enableContactEvents>::call )
+		.function( "getContactData", &Guarded<&Shape::getContactData>::call )
+		.function( "enableHitEvents", &Guarded<&Shape::enableHitEvents>::call )
+		.function( "getFilter", &Guarded<&Shape::getFilter>::call )
+		.function( "setFilter", &Guarded<&Shape::setFilter>::call )
+		.function( "getAABB", &Guarded<&Shape::getAABB>::call )
+		.function( "getClosestPoint", &Guarded<&Shape::getClosestPoint>::call )
+		.function( "rayCast", &Guarded<&Shape::rayCast>::call );
 
 	class_<Joint>( "Joint" )
 		.function( "isValid", &Joint::isValid )
 		.function( "destroy", &Joint::destroy )
-		.function( "getType", &Joint::getType )
-		.function( "wakeBodies", &Joint::wakeBodies )
-		.function( "getCollideConnected", &Joint::getCollideConnected )
-		.function( "setCollideConnected", &Joint::setCollideConnected )
-		.function( "getLocalFrameA", &Joint::getLocalFrameA )
-		.function( "getLocalFrameB", &Joint::getLocalFrameB )
-		.function( "getConstraintForce", &Joint::getConstraintForce )
-		.function( "getConstraintTorque", &Joint::getConstraintTorque )
-		.function( "setForceThreshold", &Joint::setForceThreshold )
-		.function( "setTorqueThreshold", &Joint::setTorqueThreshold )
+		.function( "getType", &Guarded<&Joint::getType>::call )
+		.function( "wakeBodies", &Guarded<&Joint::wakeBodies>::call )
+		.function( "getCollideConnected", &Guarded<&Joint::getCollideConnected>::call )
+		.function( "setCollideConnected", &Guarded<&Joint::setCollideConnected>::call )
+		.function( "getLocalFrameA", &Guarded<&Joint::getLocalFrameA>::call )
+		.function( "getLocalFrameB", &Guarded<&Joint::getLocalFrameB>::call )
+		.function( "getConstraintForce", &Guarded<&Joint::getConstraintForce>::call )
+		.function( "getConstraintTorque", &Guarded<&Joint::getConstraintTorque>::call )
+		.function( "setForceThreshold", &Guarded<&Joint::setForceThreshold>::call )
+		.function( "setTorqueThreshold", &Guarded<&Joint::setTorqueThreshold>::call )
 		.function( "getIndex", &Joint::getIndex );
 
 	class_<DistanceJoint, base<Joint>>( "DistanceJoint" )
-		.function( "setLength", &DistanceJoint::setLength )
-		.function( "getLength", &DistanceJoint::getLength )
-		.function( "getCurrentLength", &DistanceJoint::getCurrentLength )
-		.function( "enableSpring", &DistanceJoint::enableSpring )
-		.function( "setSpringHertz", &DistanceJoint::setSpringHertz )
-		.function( "setSpringDampingRatio", &DistanceJoint::setSpringDampingRatio )
-		.function( "enableLimit", &DistanceJoint::enableLimit )
-		.function( "setLengthRange", &DistanceJoint::setLengthRange )
-		.function( "enableMotor", &DistanceJoint::enableMotor )
-		.function( "setMotorSpeed", &DistanceJoint::setMotorSpeed )
-		.function( "setMaxMotorForce", &DistanceJoint::setMaxMotorForce );
+		.function( "setLength", &Guarded<&DistanceJoint::setLength>::call )
+		.function( "getLength", &Guarded<&DistanceJoint::getLength>::call )
+		.function( "getCurrentLength", &Guarded<&DistanceJoint::getCurrentLength>::call )
+		.function( "enableSpring", &Guarded<&DistanceJoint::enableSpring>::call )
+		.function( "setSpringHertz", &Guarded<&DistanceJoint::setSpringHertz>::call )
+		.function( "setSpringDampingRatio", &Guarded<&DistanceJoint::setSpringDampingRatio>::call )
+		.function( "enableLimit", &Guarded<&DistanceJoint::enableLimit>::call )
+		.function( "setLengthRange", &Guarded<&DistanceJoint::setLengthRange>::call )
+		.function( "enableMotor", &Guarded<&DistanceJoint::enableMotor>::call )
+		.function( "setMotorSpeed", &Guarded<&DistanceJoint::setMotorSpeed>::call )
+		.function( "setMaxMotorForce", &Guarded<&DistanceJoint::setMaxMotorForce>::call );
 
 	class_<RevoluteJoint, base<Joint>>( "RevoluteJoint" )
-		.function( "getAngle", &RevoluteJoint::getAngle )
-		.function( "enableSpring", &RevoluteJoint::enableSpring )
-		.function( "setSpringHertz", &RevoluteJoint::setSpringHertz )
-		.function( "setSpringDampingRatio", &RevoluteJoint::setSpringDampingRatio )
-		.function( "setTargetAngle", &RevoluteJoint::setTargetAngle )
-		.function( "enableLimit", &RevoluteJoint::enableLimit )
-		.function( "setLimits", &RevoluteJoint::setLimits )
-		.function( "enableMotor", &RevoluteJoint::enableMotor )
-		.function( "setMotorSpeed", &RevoluteJoint::setMotorSpeed )
-		.function( "setMaxMotorTorque", &RevoluteJoint::setMaxMotorTorque )
-		.function( "getMotorTorque", &RevoluteJoint::getMotorTorque );
+		.function( "getAngle", &Guarded<&RevoluteJoint::getAngle>::call )
+		.function( "enableSpring", &Guarded<&RevoluteJoint::enableSpring>::call )
+		.function( "setSpringHertz", &Guarded<&RevoluteJoint::setSpringHertz>::call )
+		.function( "setSpringDampingRatio", &Guarded<&RevoluteJoint::setSpringDampingRatio>::call )
+		.function( "setTargetAngle", &Guarded<&RevoluteJoint::setTargetAngle>::call )
+		.function( "enableLimit", &Guarded<&RevoluteJoint::enableLimit>::call )
+		.function( "setLimits", &Guarded<&RevoluteJoint::setLimits>::call )
+		.function( "enableMotor", &Guarded<&RevoluteJoint::enableMotor>::call )
+		.function( "setMotorSpeed", &Guarded<&RevoluteJoint::setMotorSpeed>::call )
+		.function( "setMaxMotorTorque", &Guarded<&RevoluteJoint::setMaxMotorTorque>::call )
+		.function( "getMotorTorque", &Guarded<&RevoluteJoint::getMotorTorque>::call );
 
 	class_<SphericalJoint, base<Joint>>( "SphericalJoint" )
-		.function( "enableConeLimit", &SphericalJoint::enableConeLimit )
-		.function( "setConeLimit", &SphericalJoint::setConeLimit )
-		.function( "getConeAngle", &SphericalJoint::getConeAngle )
-		.function( "enableTwistLimit", &SphericalJoint::enableTwistLimit )
-		.function( "setTwistLimits", &SphericalJoint::setTwistLimits )
-		.function( "getTwistAngle", &SphericalJoint::getTwistAngle )
-		.function( "enableSpring", &SphericalJoint::enableSpring )
-		.function( "setSpringHertz", &SphericalJoint::setSpringHertz )
-		.function( "setSpringDampingRatio", &SphericalJoint::setSpringDampingRatio )
-		.function( "setTargetRotation", &SphericalJoint::setTargetRotation )
-		.function( "enableMotor", &SphericalJoint::enableMotor )
-		.function( "setMotorVelocity", &SphericalJoint::setMotorVelocity )
-		.function( "setMaxMotorTorque", &SphericalJoint::setMaxMotorTorque );
+		.function( "enableConeLimit", &Guarded<&SphericalJoint::enableConeLimit>::call )
+		.function( "setConeLimit", &Guarded<&SphericalJoint::setConeLimit>::call )
+		.function( "getConeAngle", &Guarded<&SphericalJoint::getConeAngle>::call )
+		.function( "enableTwistLimit", &Guarded<&SphericalJoint::enableTwistLimit>::call )
+		.function( "setTwistLimits", &Guarded<&SphericalJoint::setTwistLimits>::call )
+		.function( "getTwistAngle", &Guarded<&SphericalJoint::getTwistAngle>::call )
+		.function( "enableSpring", &Guarded<&SphericalJoint::enableSpring>::call )
+		.function( "setSpringHertz", &Guarded<&SphericalJoint::setSpringHertz>::call )
+		.function( "setSpringDampingRatio", &Guarded<&SphericalJoint::setSpringDampingRatio>::call )
+		.function( "setTargetRotation", &Guarded<&SphericalJoint::setTargetRotation>::call )
+		.function( "enableMotor", &Guarded<&SphericalJoint::enableMotor>::call )
+		.function( "setMotorVelocity", &Guarded<&SphericalJoint::setMotorVelocity>::call )
+		.function( "setMaxMotorTorque", &Guarded<&SphericalJoint::setMaxMotorTorque>::call );
 
 	class_<PrismaticJoint, base<Joint>>( "PrismaticJoint" )
-		.function( "getTranslation", &PrismaticJoint::getTranslation )
-		.function( "getSpeed", &PrismaticJoint::getSpeed )
-		.function( "enableSpring", &PrismaticJoint::enableSpring )
-		.function( "setSpringHertz", &PrismaticJoint::setSpringHertz )
-		.function( "setSpringDampingRatio", &PrismaticJoint::setSpringDampingRatio )
-		.function( "setTargetTranslation", &PrismaticJoint::setTargetTranslation )
-		.function( "enableLimit", &PrismaticJoint::enableLimit )
-		.function( "setLimits", &PrismaticJoint::setLimits )
-		.function( "enableMotor", &PrismaticJoint::enableMotor )
-		.function( "setMotorSpeed", &PrismaticJoint::setMotorSpeed )
-		.function( "setMaxMotorForce", &PrismaticJoint::setMaxMotorForce );
+		.function( "getTranslation", &Guarded<&PrismaticJoint::getTranslation>::call )
+		.function( "getSpeed", &Guarded<&PrismaticJoint::getSpeed>::call )
+		.function( "enableSpring", &Guarded<&PrismaticJoint::enableSpring>::call )
+		.function( "setSpringHertz", &Guarded<&PrismaticJoint::setSpringHertz>::call )
+		.function( "setSpringDampingRatio", &Guarded<&PrismaticJoint::setSpringDampingRatio>::call )
+		.function( "setTargetTranslation", &Guarded<&PrismaticJoint::setTargetTranslation>::call )
+		.function( "enableLimit", &Guarded<&PrismaticJoint::enableLimit>::call )
+		.function( "setLimits", &Guarded<&PrismaticJoint::setLimits>::call )
+		.function( "enableMotor", &Guarded<&PrismaticJoint::enableMotor>::call )
+		.function( "setMotorSpeed", &Guarded<&PrismaticJoint::setMotorSpeed>::call )
+		.function( "setMaxMotorForce", &Guarded<&PrismaticJoint::setMaxMotorForce>::call );
 
 	class_<WeldJoint, base<Joint>>( "WeldJoint" )
-		.function( "setLinearHertz", &WeldJoint::setLinearHertz )
-		.function( "setLinearDampingRatio", &WeldJoint::setLinearDampingRatio )
-		.function( "setAngularHertz", &WeldJoint::setAngularHertz )
-		.function( "setAngularDampingRatio", &WeldJoint::setAngularDampingRatio );
+		.function( "setLinearHertz", &Guarded<&WeldJoint::setLinearHertz>::call )
+		.function( "setLinearDampingRatio", &Guarded<&WeldJoint::setLinearDampingRatio>::call )
+		.function( "setAngularHertz", &Guarded<&WeldJoint::setAngularHertz>::call )
+		.function( "setAngularDampingRatio", &Guarded<&WeldJoint::setAngularDampingRatio>::call );
 
 	class_<MotorJoint, base<Joint>>( "MotorJoint" )
-		.function( "setLinearVelocity", &MotorJoint::setLinearVelocity )
-		.function( "setAngularVelocity", &MotorJoint::setAngularVelocity )
-		.function( "setMaxVelocityForce", &MotorJoint::setMaxVelocityForce )
-		.function( "setMaxVelocityTorque", &MotorJoint::setMaxVelocityTorque )
-		.function( "setLinearHertz", &MotorJoint::setLinearHertz )
-		.function( "setLinearDampingRatio", &MotorJoint::setLinearDampingRatio )
-		.function( "setAngularHertz", &MotorJoint::setAngularHertz )
-		.function( "setAngularDampingRatio", &MotorJoint::setAngularDampingRatio )
-		.function( "setMaxSpringForce", &MotorJoint::setMaxSpringForce )
-		.function( "setMaxSpringTorque", &MotorJoint::setMaxSpringTorque );
+		.function( "setLinearVelocity", &Guarded<&MotorJoint::setLinearVelocity>::call )
+		.function( "setAngularVelocity", &Guarded<&MotorJoint::setAngularVelocity>::call )
+		.function( "setMaxVelocityForce", &Guarded<&MotorJoint::setMaxVelocityForce>::call )
+		.function( "setMaxVelocityTorque", &Guarded<&MotorJoint::setMaxVelocityTorque>::call )
+		.function( "setLinearHertz", &Guarded<&MotorJoint::setLinearHertz>::call )
+		.function( "setLinearDampingRatio", &Guarded<&MotorJoint::setLinearDampingRatio>::call )
+		.function( "setAngularHertz", &Guarded<&MotorJoint::setAngularHertz>::call )
+		.function( "setAngularDampingRatio", &Guarded<&MotorJoint::setAngularDampingRatio>::call )
+		.function( "setMaxSpringForce", &Guarded<&MotorJoint::setMaxSpringForce>::call )
+		.function( "setMaxSpringTorque", &Guarded<&MotorJoint::setMaxSpringTorque>::call );
 
 	class_<WheelJoint, base<Joint>>( "WheelJoint" )
-		.function( "enableSuspension", &WheelJoint::enableSuspension )
-		.function( "setSuspensionHertz", &WheelJoint::setSuspensionHertz )
-		.function( "setSuspensionDampingRatio", &WheelJoint::setSuspensionDampingRatio )
-		.function( "enableSuspensionLimit", &WheelJoint::enableSuspensionLimit )
-		.function( "setSuspensionLimits", &WheelJoint::setSuspensionLimits )
-		.function( "enableSpinMotor", &WheelJoint::enableSpinMotor )
-		.function( "setSpinMotorSpeed", &WheelJoint::setSpinMotorSpeed )
-		.function( "setMaxSpinTorque", &WheelJoint::setMaxSpinTorque )
-		.function( "getSpinSpeed", &WheelJoint::getSpinSpeed )
-		.function( "enableSteering", &WheelJoint::enableSteering )
-		.function( "setSteeringHertz", &WheelJoint::setSteeringHertz )
-		.function( "setSteeringDampingRatio", &WheelJoint::setSteeringDampingRatio )
-		.function( "setMaxSteeringTorque", &WheelJoint::setMaxSteeringTorque )
-		.function( "enableSteeringLimit", &WheelJoint::enableSteeringLimit )
-		.function( "setSteeringLimits", &WheelJoint::setSteeringLimits )
-		.function( "setTargetSteeringAngle", &WheelJoint::setTargetSteeringAngle )
-		.function( "getSteeringAngle", &WheelJoint::getSteeringAngle );
+		.function( "enableSuspension", &Guarded<&WheelJoint::enableSuspension>::call )
+		.function( "setSuspensionHertz", &Guarded<&WheelJoint::setSuspensionHertz>::call )
+		.function( "setSuspensionDampingRatio", &Guarded<&WheelJoint::setSuspensionDampingRatio>::call )
+		.function( "enableSuspensionLimit", &Guarded<&WheelJoint::enableSuspensionLimit>::call )
+		.function( "setSuspensionLimits", &Guarded<&WheelJoint::setSuspensionLimits>::call )
+		.function( "enableSpinMotor", &Guarded<&WheelJoint::enableSpinMotor>::call )
+		.function( "setSpinMotorSpeed", &Guarded<&WheelJoint::setSpinMotorSpeed>::call )
+		.function( "setMaxSpinTorque", &Guarded<&WheelJoint::setMaxSpinTorque>::call )
+		.function( "getSpinSpeed", &Guarded<&WheelJoint::getSpinSpeed>::call )
+		.function( "enableSteering", &Guarded<&WheelJoint::enableSteering>::call )
+		.function( "setSteeringHertz", &Guarded<&WheelJoint::setSteeringHertz>::call )
+		.function( "setSteeringDampingRatio", &Guarded<&WheelJoint::setSteeringDampingRatio>::call )
+		.function( "setMaxSteeringTorque", &Guarded<&WheelJoint::setMaxSteeringTorque>::call )
+		.function( "enableSteeringLimit", &Guarded<&WheelJoint::enableSteeringLimit>::call )
+		.function( "setSteeringLimits", &Guarded<&WheelJoint::setSteeringLimits>::call )
+		.function( "setTargetSteeringAngle", &Guarded<&WheelJoint::setTargetSteeringAngle>::call )
+		.function( "getSteeringAngle", &Guarded<&WheelJoint::getSteeringAngle>::call );
 
 	class_<ParallelJoint, base<Joint>>( "ParallelJoint" )
-		.function( "setSpringHertz", &ParallelJoint::setSpringHertz )
-		.function( "setSpringDampingRatio", &ParallelJoint::setSpringDampingRatio )
-		.function( "setMaxTorque", &ParallelJoint::setMaxTorque );
+		.function( "setSpringHertz", &Guarded<&ParallelJoint::setSpringHertz>::call )
+		.function( "setSpringDampingRatio", &Guarded<&ParallelJoint::setSpringDampingRatio>::call )
+		.function( "setMaxTorque", &Guarded<&ParallelJoint::setMaxTorque>::call );
 
 	class_<FilterJoint, base<Joint>>( "FilterJoint" );
 }
