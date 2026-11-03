@@ -1896,6 +1896,44 @@ struct World
 		return arr;
 	}
 
+	// The body move events as typed arrays, not one object per event: { count, bodyIndex (Uint32Array),
+	// userData (Uint32Array), transform (Float32Array, x y z qx qy qz qw per event), fellAsleep (Uint8Array) }.
+	// The arrays are views of the module's memory, valid until the next call into the module.
+	val getBodyMoveEvents() const
+	{
+		static std::vector<uint32_t> index, tags;
+		static std::vector<float> transform;
+		static std::vector<uint8_t> asleep;
+		b3BodyEvents events = b3World_GetBodyEvents( id );
+		int n = events.moveCount;
+		index.resize( n );
+		tags.resize( n );
+		transform.resize( 7 * n );
+		asleep.resize( n );
+		for ( int i = 0; i < n; ++i )
+		{
+			const b3BodyMoveEvent& e = events.moveEvents[i];
+			index[i] = (uint32_t)e.bodyId.index1;
+			tags[i] = (uint32_t)(uintptr_t)e.userData;
+			float* t = transform.data() + 7 * i;
+			t[0] = (float)e.transform.p.x;
+			t[1] = (float)e.transform.p.y;
+			t[2] = (float)e.transform.p.z;
+			t[3] = e.transform.q.v.x;
+			t[4] = e.transform.q.v.y;
+			t[5] = e.transform.q.v.z;
+			t[6] = e.transform.q.s;
+			asleep[i] = e.fellAsleep ? 1 : 0;
+		}
+		val o = val::object();
+		o.set( "count", n );
+		o.set( "bodyIndex", val( emscripten::typed_memory_view( index.size(), index.data() ) ) );
+		o.set( "userData", val( emscripten::typed_memory_view( tags.size(), tags.data() ) ) );
+		o.set( "transform", val( emscripten::typed_memory_view( transform.size(), transform.data() ) ) );
+		o.set( "fellAsleep", val( emscripten::typed_memory_view( asleep.size(), asleep.data() ) ) );
+		return o;
+	}
+
 	val getContactEvents() const
 	{
 		b3ContactEvents events = b3World_GetContactEvents( id );
@@ -2034,6 +2072,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "collideMover", &World::collideMover )
 		.function( "explode", &World::explode )
 		.function( "getBodyEvents", &World::getBodyEvents )
+		.function( "getBodyMoveEvents", &World::getBodyMoveEvents )
 		.function( "getContactEvents", &World::getContactEvents )
 		.function( "getSensorEvents", &World::getSensorEvents )
 		.function( "getProfile", &World::getProfile );
