@@ -1377,6 +1377,49 @@ struct Body
 		b3DestroyHull( hull );
 		return shape;
 	}
+
+	// A height field from a flat array of heights, row by row: heights[z * countX + x]. The grid starts at the body's
+	// origin and spans (countX - 1) * scale.x along x and (countZ - 1) * scale.z along z. Heights are quantized to 16
+	// bits between globalMinimumHeight and globalMaximumHeight (default: the heights' own range). The shape keeps a
+	// pointer to the data, so the data lives as long as the module.
+	Shape createHeightField( val opts )
+	{
+		b3ShapeDef def = shapeDefFromOpts( opts );
+		std::vector<float> heights = emscripten::convertJSArrayToNumberVector<float>( opts["heights"] );
+		b3HeightFieldDef hd = {};
+		hd.countX = getInt( opts, "countX", 0 );
+		hd.countZ = getInt( opts, "countZ", 0 );
+		if ( hd.countX < 2 || hd.countZ < 2 || (int)heights.size() != hd.countX * hd.countZ )
+		{
+			Shape shape = { b3_nullShapeId };
+			return shape;
+		}
+		float lo = heights[0], hi = heights[0];
+		for ( float h : heights )
+		{
+			lo = h < lo ? h : lo;
+			hi = h > hi ? h : hi;
+		}
+		std::vector<uint8_t> materials;
+		if ( hasKey( opts, "materialIndices" ) )
+		{
+			materials = emscripten::convertJSArrayToNumberVector<uint8_t>( opts["materialIndices"] );
+		}
+		hd.heights = heights.data();
+		hd.materialIndices = (int)materials.size() == ( hd.countX - 1 ) * ( hd.countZ - 1 ) ? materials.data() : nullptr;
+		hd.scale = getVec3( opts, "scale", { 1.0f, 1.0f, 1.0f } );
+		hd.globalMinimumHeight = getFloat( opts, "globalMinimumHeight", lo );
+		hd.globalMaximumHeight = getFloat( opts, "globalMaximumHeight", hi );
+		hd.clockwiseWinding = getBool( opts, "clockwiseWinding", false );
+		b3HeightFieldData* data = b3CreateHeightField( &hd );
+		if ( data == nullptr )
+		{
+			Shape shape = { b3_nullShapeId };
+			return shape;
+		}
+		Shape shape = { b3CreateHeightFieldShape( id, &def, data ) };
+		return shape;
+	}
 };
 
 static void applyJointBase( b3JointDef* base, const Body& a, const Body& b, const val& opts )
@@ -2044,6 +2087,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "getMotionLocks", &Body::getMotionLocks )
 		.function( "getShapeCount", &Body::getShapeCount )
 		.function( "computeAABB", &Body::computeAABB )
+		.function( "createHeightField", &Body::createHeightField )
 		.function( "createSphere", &Body::createSphere )
 		.function( "createCapsule", &Body::createCapsule )
 		.function( "createBox", &Body::createBox )
