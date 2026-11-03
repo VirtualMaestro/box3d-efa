@@ -470,6 +470,51 @@ struct Shape
 		b3Shape_EnableContactEvents( id, flag );
 	}
 
+	// The shape's touching contacts (b3Shape_GetContactData): an array of { bodyIndexA, bodyIndexB, shapeUserDataA,
+	// shapeUserDataB, manifolds: [{ normal, points: [{ anchorA, anchorB, separation, normalImpulse,
+	// totalNormalImpulse, normalVelocity }] }] }. Anchors are relative to each body's center of mass.
+	val getContactData() const
+	{
+		int capacity = b3Shape_GetContactCapacity( id );
+		std::vector<b3ContactData> data( capacity > 0 ? capacity : 0 );
+		int n = capacity > 0 ? b3Shape_GetContactData( id, data.data(), capacity ) : 0;
+		val out = val::array();
+		for ( int i = 0; i < n; ++i )
+		{
+			const b3ContactData& c = data[i];
+			val o = val::object();
+			o.set( "bodyIndexA", b3Shape_GetBody( c.shapeIdA ).index1 );
+			o.set( "bodyIndexB", b3Shape_GetBody( c.shapeIdB ).index1 );
+			o.set( "shapeUserDataA", tagOf( b3Shape_GetUserData( c.shapeIdA ) ) );
+			o.set( "shapeUserDataB", tagOf( b3Shape_GetUserData( c.shapeIdB ) ) );
+			val manifolds = val::array();
+			for ( int m = 0; m < c.manifoldCount; ++m )
+			{
+				const b3Manifold& mf = c.manifolds[m];
+				val mo = val::object();
+				mo.set( "normal", fromVec3( mf.normal ) );
+				val points = val::array();
+				for ( int k = 0; k < mf.pointCount; ++k )
+				{
+					const b3ManifoldPoint& mp = mf.points[k];
+					val po = val::object();
+					po.set( "anchorA", fromVec3( mp.anchorA ) );
+					po.set( "anchorB", fromVec3( mp.anchorB ) );
+					po.set( "separation", mp.separation );
+					po.set( "normalImpulse", mp.normalImpulse );
+					po.set( "totalNormalImpulse", mp.totalNormalImpulse );
+					po.set( "normalVelocity", mp.normalVelocity );
+					points.set( k, po );
+				}
+				mo.set( "points", points );
+				manifolds.set( m, mo );
+			}
+			o.set( "manifolds", manifolds );
+			out.set( i, o );
+		}
+		return out;
+	}
+
 	void enableHitEvents( bool flag )
 	{
 		b3Shape_EnableHitEvents( id, flag );
@@ -599,6 +644,24 @@ struct Joint
 	val getConstraintTorque() const
 	{
 		return fromVec3( b3Joint_GetConstraintTorque( id ) );
+	}
+
+	// A joint event (World.getJointEvents) is raised in a step where the constraint force or torque exceeds its
+	// threshold. The thresholds default to FLT_MAX: no events.
+	void setForceThreshold( float threshold )
+	{
+		b3Joint_SetForceThreshold( id, threshold );
+	}
+
+	void setTorqueThreshold( float threshold )
+	{
+		b3Joint_SetTorqueThreshold( id, threshold );
+	}
+
+	// The joint's index, as a joint event names it.
+	int getIndex() const
+	{
+		return id.index1;
 	}
 };
 
@@ -2059,6 +2122,21 @@ struct World
 		return out;
 	}
 
+	// The joints whose force or torque exceeded their threshold in the last step: an array of { jointIndex, userData }.
+	val getJointEvents() const
+	{
+		b3JointEvents events = b3World_GetJointEvents( id );
+		val out = val::array();
+		for ( int i = 0; i < events.count; ++i )
+		{
+			val o = val::object();
+			o.set( "jointIndex", events.jointEvents[i].jointId.index1 );
+			o.set( "userData", tagOf( events.jointEvents[i].userData ) );
+			out.set( i, o );
+		}
+		return out;
+	}
+
 	val getProfile() const
 	{
 		b3Profile p = b3World_GetProfile( id );
@@ -2125,6 +2203,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "getBodyMoveEvents", &World::getBodyMoveEvents )
 		.function( "getContactEvents", &World::getContactEvents )
 		.function( "getSensorEvents", &World::getSensorEvents )
+		.function( "getJointEvents", &World::getJointEvents )
 		.function( "getProfile", &World::getProfile );
 
 	class_<Body>( "Body" )
@@ -2198,6 +2277,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "isSensor", &Shape::isSensor )
 		.function( "enableSensorEvents", &Shape::enableSensorEvents )
 		.function( "enableContactEvents", &Shape::enableContactEvents )
+		.function( "getContactData", &Shape::getContactData )
 		.function( "enableHitEvents", &Shape::enableHitEvents )
 		.function( "getFilter", &Shape::getFilter )
 		.function( "setFilter", &Shape::setFilter )
@@ -2215,7 +2295,10 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "getLocalFrameA", &Joint::getLocalFrameA )
 		.function( "getLocalFrameB", &Joint::getLocalFrameB )
 		.function( "getConstraintForce", &Joint::getConstraintForce )
-		.function( "getConstraintTorque", &Joint::getConstraintTorque );
+		.function( "getConstraintTorque", &Joint::getConstraintTorque )
+		.function( "setForceThreshold", &Joint::setForceThreshold )
+		.function( "setTorqueThreshold", &Joint::setTorqueThreshold )
+		.function( "getIndex", &Joint::getIndex );
 
 	class_<DistanceJoint, base<Joint>>( "DistanceJoint" )
 		.function( "setLength", &DistanceJoint::setLength )
