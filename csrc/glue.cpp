@@ -168,6 +168,97 @@ static b3QueryFilter queryFilterFromOpts( const val& o )
 	return filter;
 }
 
+// ---------------------------------------------------------------------------
+// Queries (ray and shape casts, overlap, closest point)
+// ---------------------------------------------------------------------------
+
+static_assert( sizeof( b3Pos ) == sizeof( b3Vec3 ), "the query glue assumes single precision positions" );
+
+// A shape proxy from { points: [{x, y, z}, ...], radius }, relative to the query's origin. At most
+// B3_MAX_SHAPE_CAST_POINTS points: a sphere is one point with a radius, a capsule two.
+static b3ShapeProxy proxyFromOpts( const val& o, b3Vec3* points )
+{
+	val arr = o["points"];
+	int n = arr["length"].as<int>();
+	n = n < B3_MAX_SHAPE_CAST_POINTS ? n : B3_MAX_SHAPE_CAST_POINTS;
+	for ( int i = 0; i < n; ++i )
+	{
+		points[i] = toVec3( arr[i], b3Vec3_zero );
+	}
+	b3ShapeProxy proxy = { points, n, getFloat( o, "radius", 0.0f ) };
+	return proxy;
+}
+
+// World queries report sensor shapes; these glue queries leave them out unless the filter says includeSensors.
+static bool includeSensorsOf( const val& filterOpts )
+{
+	return getBool( filterOpts, "includeSensors", false );
+}
+
+// The body a query hit: its index (Body.getIndex) and both user data tags.
+static void setHitShape( val& o, b3ShapeId shapeId )
+{
+	b3BodyId body = b3Shape_GetBody( shapeId );
+	o.set( "bodyIndex", body.index1 );
+	o.set( "bodyUserData", tagOf( b3Body_GetUserData( body ) ) );
+	o.set( "shapeUserData", tagOf( b3Shape_GetUserData( shapeId ) ) );
+}
+
+struct ClosestCastContext
+{
+	bool includeSensors;
+	bool hit;
+	b3ShapeId shapeId;
+	b3Vec3 point;
+	b3Vec3 normal;
+	float fraction;
+};
+
+static float closestCastFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, float fraction, uint64_t, int, int, void* context )
+{
+	ClosestCastContext* c = (ClosestCastContext*)context;
+	if ( !c->includeSensors && b3Shape_IsSensor( shapeId ) )
+	{
+		return -1.0f;
+	}
+	c->hit = true;
+	c->shapeId = shapeId;
+	c->point = point;
+	c->normal = normal;
+	c->fraction = fraction;
+	return fraction;
+}
+
+static val closestCastResult( const ClosestCastContext& c )
+{
+	val o = val::object();
+	o.set( "hit", c.hit );
+	if ( c.hit )
+	{
+		o.set( "point", fromVec3( c.point ) );
+		o.set( "normal", fromVec3( c.normal ) );
+		o.set( "fraction", c.fraction );
+		setHitShape( o, c.shapeId );
+	}
+	return o;
+}
+
+struct OverlapContext
+{
+	bool includeSensors;
+	std::vector<b3ShapeId> shapes;
+};
+
+static bool overlapFcn( b3ShapeId shapeId, void* context )
+{
+	OverlapContext* c = (OverlapContext*)context;
+	if ( c->includeSensors || !b3Shape_IsSensor( shapeId ) )
+	{
+		c->shapes.push_back( shapeId );
+	}
+	return true;
+}
+
 static b3ShapeDef shapeDefFromOpts( const val& o )
 {
 	b3ShapeDef def = b3DefaultShapeDef();
@@ -322,6 +413,12 @@ struct Shape
 		o.set( "lowerBound", fromVec3( aabb.lowerBound ) );
 		o.set( "upperBound", fromVec3( aabb.upperBound ) );
 		return o;
+	}
+
+	// The point on this shape closest to target, in world space (target itself when it is inside a solid shape).
+	val getClosestPoint( val target ) const
+	{
+		return fromVec3( b3Shape_GetClosestPoint( id, toVec3( target, b3Vec3_zero ) ) );
 	}
 
 	val rayCast( val origin, val translation ) const
@@ -836,6 +933,18 @@ struct Body
 	void setUserData( double tag )
 	{
 		b3Body_SetUserData( id, (void*)(uintptr_t)tag );
+	}
+
+	// The body's id as numbers. Query hits name their body by this index (bodyIndex); the generation tells apart
+	// bodies that reuse an index.
+	int getIndex() const
+	{
+		return id.index1;
+	}
+
+	int getGeneration() const
+	{
+		return id.generation;
 	}
 
 	val getPosition() const
@@ -1529,6 +1638,83 @@ struct World
 		return o;
 	}
 
+	// The closest ray hit (b3World_CastRay with a clipping callback), sensors left out unless
+	// filterOpts.includeSensors. Unlike castRayClosest, the hit names its body by index too.
+	val castRay( val origin, val translation, val filterOpts ) const
+	{
+		ClosestCastContext c = { includeSensorsOf( filterOpts ), false, b3_nullShapeId, b3Vec3_zero, b3Vec3_zero, 1.0f };
+		b3World_CastRay( id, toVec3( origin, b3Vec3_zero ), toVec3( translation, b3Vec3_zero ), queryFilterFromOpts( filterOpts ),
+						 closestCastFcn, &c );
+		return closestCastResult( c );
+	}
+
+	// The closest hit of a shape proxy ({ points, radius }, relative to origin) swept by translation
+	// (b3World_CastShape). Shapes the proxy overlaps at the start are reported at fraction 0.
+	val castShape( val origin, val proxyOpts, val translation, val filterOpts ) const
+	{
+		b3Vec3 points[B3_MAX_SHAPE_CAST_POINTS];
+		b3ShapeProxy proxy = proxyFromOpts( proxyOpts, points );
+		ClosestCastContext c = { includeSensorsOf( filterOpts ), false, b3_nullShapeId, b3Vec3_zero, b3Vec3_zero, 1.0f };
+		b3World_CastShape( id, toVec3( origin, b3Vec3_zero ), &proxy, toVec3( translation, b3Vec3_zero ),
+						   queryFilterFromOpts( filterOpts ), closestCastFcn, &c );
+		return closestCastResult( c );
+	}
+
+	// Every shape a proxy ({ points, radius }, relative to origin) overlaps (b3World_OverlapShape): an array of
+	// { bodyIndex, bodyUserData, shapeUserData }, one per shape, in the tree's order.
+	val overlapShape( val origin, val proxyOpts, val filterOpts ) const
+	{
+		b3Vec3 points[B3_MAX_SHAPE_CAST_POINTS];
+		b3ShapeProxy proxy = proxyFromOpts( proxyOpts, points );
+		OverlapContext c = { includeSensorsOf( filterOpts ), {} };
+		b3World_OverlapShape( id, toVec3( origin, b3Vec3_zero ), &proxy, queryFilterFromOpts( filterOpts ), overlapFcn, &c );
+		val out = val::array();
+		for ( size_t i = 0; i < c.shapes.size(); ++i )
+		{
+			val o = val::object();
+			setHitShape( o, c.shapes[i] );
+			out.set( i, o );
+		}
+		return out;
+	}
+
+	// The nearest point on any shape within maxDistance of target: the shapes a sphere of that radius overlaps, then
+	// b3Shape_GetClosestPoint on each. { hit, point, distance, bodyIndex, bodyUserData, shapeUserData }; ties go to the
+	// shape found first.
+	val closestPoint( val target, float maxDistance, val filterOpts ) const
+	{
+		b3Vec3 t = toVec3( target, b3Vec3_zero );
+		b3Vec3 center = b3Vec3_zero;
+		b3ShapeProxy proxy = { &center, 1, maxDistance };
+		OverlapContext c = { includeSensorsOf( filterOpts ), {} };
+		b3World_OverlapShape( id, t, &proxy, queryFilterFromOpts( filterOpts ), overlapFcn, &c );
+		bool hit = false;
+		float best = maxDistance;
+		b3Vec3 point = b3Vec3_zero;
+		b3ShapeId shape = b3_nullShapeId;
+		for ( b3ShapeId s : c.shapes )
+		{
+			b3Vec3 p = b3Shape_GetClosestPoint( s, t );
+			float d = b3Length( b3Sub( p, t ) );
+			if ( d <= best && ( !hit || d < best ) )
+			{
+				hit = true;
+				best = d;
+				point = p;
+				shape = s;
+			}
+		}
+		val o = val::object();
+		o.set( "hit", hit );
+		if ( hit )
+		{
+			o.set( "point", fromVec3( point ) );
+			o.set( "distance", best );
+			setHitShape( o, shape );
+		}
+		return o;
+	}
+
 	void explode( val opts )
 	{
 		b3ExplosionDef def = b3DefaultExplosionDef();
@@ -1687,6 +1873,10 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "createParallelJoint", &World::createParallelJoint )
 		.function( "createFilterJoint", &World::createFilterJoint )
 		.function( "castRayClosest", &World::castRayClosest )
+		.function( "castRay", &World::castRay )
+		.function( "castShape", &World::castShape )
+		.function( "overlapShape", &World::overlapShape )
+		.function( "closestPoint", &World::closestPoint )
 		.function( "explode", &World::explode )
 		.function( "getBodyEvents", &World::getBodyEvents )
 		.function( "getContactEvents", &World::getContactEvents )
@@ -1702,6 +1892,8 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "setName", &Body::setName )
 		.function( "getUserData", &Body::getUserData )
 		.function( "setUserData", &Body::setUserData )
+		.function( "getIndex", &Body::getIndex )
+		.function( "getGeneration", &Body::getGeneration )
 		.function( "getPosition", &Body::getPosition )
 		.function( "getRotation", &Body::getRotation )
 		.function( "getTransform", &Body::getTransform )
@@ -1765,6 +1957,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "getFilter", &Shape::getFilter )
 		.function( "setFilter", &Shape::setFilter )
 		.function( "getAABB", &Shape::getAABB )
+		.function( "getClosestPoint", &Shape::getClosestPoint )
 		.function( "rayCast", &Shape::rayCast );
 
 	class_<Joint>( "Joint" )
