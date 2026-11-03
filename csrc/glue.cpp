@@ -57,12 +57,15 @@ EM_JS( double, b3g_number, ( EM_VAL o, EM_VAL key, double fallback ), {
 	return v === undefined || v === null ? fallback : +v;
 } );
 
-// o[key] as an int32 (v | 0, as a number argument to WebAssembly converts), or fallback.
+// o[key] as an int32, or fallback. Saturating, as val::as<int> converted (a double cast to int): v | 0 wraps modulo
+// 2^32, which turned a groupIndex of 2^31 or 0xffffffff negative (never collide instead of always).
 EM_JS( int, b3g_int, ( EM_VAL o, EM_VAL key, int fallback ), {
 	var v = Emval.toValue( o );
 	if ( v === undefined || v === null ) return fallback;
 	v = v[ Emval.toValue( key ) ];
-	return v === undefined || v === null ? fallback : v | 0;
+	if ( v === undefined || v === null ) return fallback;
+	v = +v;
+	return v !== v ? 0 : v >= 2147483647 ? 2147483647 : v <= -2147483648 ? -2147483648 : v | 0;
 } );
 
 // o[key] as 0 or 1 (truthiness), or fallback when o or o[key] is undefined or null.
@@ -323,7 +326,8 @@ static bool overlapFcn( b3ShapeId shapeId, void* context )
 // The closest point on any shape within maxDistance of target, in one pass: the broadphase boxes within maxDistance,
 // the closest point on each shape in the callback. The same shapes in the same tree order as an overlap with a
 // sphere of radius maxDistance, then the closest point per shape (the two passes this replaced): the same answers,
-// ties included.
+// ties included. Convex shapes only (spheres, capsules, hulls): b3Shape_GetClosestPoint has no answer for a mesh, a
+// height field or a compound (it gives the body's origin), and a box overlap reaches such shapes the sphere did not.
 struct ClosestPointContext
 {
 	bool includeSensors;
@@ -338,6 +342,11 @@ static bool closestPointFcn( b3ShapeId shapeId, void* context )
 {
 	ClosestPointContext* c = (ClosestPointContext*)context;
 	if ( !c->includeSensors && b3Shape_IsSensor( shapeId ) )
+	{
+		return true;
+	}
+	b3ShapeType type = b3Shape_GetType( shapeId );
+	if ( type != b3_sphereShape && type != b3_capsuleShape && type != b3_hullShape )
 	{
 		return true;
 	}
@@ -2122,9 +2131,9 @@ struct World
 		return out;
 	}
 
-	// The nearest point on any shape within maxDistance of target: the shapes a sphere of that radius overlaps, then
-	// b3Shape_GetClosestPoint on each. { hit, point, distance, bodyIndex, bodyUserData, shapeUserData }; ties go to the
-	// shape found first.
+	// The nearest point on any convex shape within maxDistance of target (closestPointOf: meshes, height fields and
+	// compounds are left out). { hit, point, distance, bodyIndex, bodyUserData, shapeUserData }; ties go to the shape
+	// found first.
 	val closestPoint( val target, float maxDistance, val filterOpts ) const
 	{
 		ClosestPointContext c = closestPointOf( id, toVec3( target, b3Vec3_zero ), maxDistance, queryFilterFromOpts( filterOpts ),
@@ -2155,7 +2164,8 @@ struct World
 	int queryBatch( int count ) const
 	{
 		g_flatOut.clear();
-		if ( count < 0 || 12 * count > (int)g_flatIn.size() )
+		// Divided, not multiplied: 12 * count wraps for a count near 2^32 / 12 and let the loop read past the input.
+		if ( count < 0 || (size_t)count > g_flatIn.size() / 12 )
 		{
 			return 0;
 		}
@@ -2312,7 +2322,8 @@ struct World
 	// old generation) or whose op is unknown is skipped. Returns the records applied.
 	int writeBodies( int count ) const
 	{
-		if ( count < 0 || 12 * count > (int)g_flatIn.size() )
+		// Divided, not multiplied: 12 * count wraps for a count near 2^32 / 12 and let the loop read past the input.
+		if ( count < 0 || (size_t)count > g_flatIn.size() / 12 )
 		{
 			return 0;
 		}
@@ -2396,7 +2407,7 @@ struct World
 	int moverBatch( int count ) const
 	{
 		g_flatOut.clear();
-		if ( count < 0 || 20 * count > (int)g_flatIn.size() )
+		if ( count < 0 || (size_t)count > g_flatIn.size() / 20 )
 		{
 			return 0;
 		}

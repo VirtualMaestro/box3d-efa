@@ -65,3 +65,24 @@ test('closestPoint and Shape.getClosestPoint', () => {
   assert.ok(near(shape.getClosestPoint({ x: -5, y: 4, z: 0 }).y, 1));
   world.destroy();
 });
+
+test('closestPoint leaves out a mesh: Box3D has no closest point on one (it gave the body origin)', () => {
+  const world = new b3.World({ gravity: { x: 0, y: -10, z: 0 } });
+  // One triangle whose box reaches the corner of the query's box (within 3 of the origin on every axis) while its
+  // surface is 3.54 from the origin: out of range.
+  const body = world.createBody({ type: 'static', position: { x: 0, y: 0, z: 0 } });
+  body.createMesh({ vertices: [2.5, 2.5, -5, 2.5, 2.5, 5, 5, 5, 0], indices: [0, 1, 2] });
+  assert.equal(world.closestPoint({ x: 0, y: 0, z: 0 }, 3, undefined).hit, false);
+  // The flat call shares the search.
+  const at = b3.flatIn(12) >> 2;
+  b3.HEAPU32.fill(0, at, at + 12);
+  b3.HEAPU32[at] = 3;
+  b3.HEAPF32[at + 10] = 3;
+  world.queryBatch(1);
+  assert.equal(b3.HEAPU32[b3.flatOut() >> 2], 0);
+  // A quad 1 below the target on a body 7.1 away: the answer was the body origin at 7.1, not the surface at 1.
+  const ground = world.createBody({ type: 'static', position: { x: 25, y: 0, z: 25 } });
+  ground.createMesh({ vertices: [-10, 0, -10, 10, 0, -10, 10, 0, 10, -10, 0, 10], indices: [0, 2, 1, 0, 3, 2] });
+  assert.equal(world.closestPoint({ x: 20, y: 1, z: 20 }, 8, undefined).hit, false);
+  world.destroy();
+});

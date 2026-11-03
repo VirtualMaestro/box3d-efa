@@ -11,7 +11,7 @@ glue (`csrc/glue.cpp`; Box3D's C code is not changed):
 | `World.castRay(origin, translation, filter)` | `b3World_CastRay` (closest hit, names the body by index) |
 | `World.castShape(origin, { points, radius }, translation, filter)` | `b3World_CastShape` (closest hit) |
 | `World.overlapShape(origin, { points, radius }, filter)` | `b3World_OverlapShape` (every shape) |
-| `World.closestPoint(target, maxDistance, filter)`, `Shape.getClosestPoint(target)` | the broadphase boxes within `maxDistance` (`b3World_OverlapAABB`), then `b3Shape_GetClosestPoint` per shape |
+| `World.closestPoint(target, maxDistance, filter)`, `Shape.getClosestPoint(target)` | the broadphase boxes within `maxDistance` (`b3World_OverlapAABB`), then `b3Shape_GetClosestPoint` per convex shape (meshes, height fields and compounds are left out: Box3D has no closest point on them) |
 | `World.castMover`, `World.collideMover`, `solvePlanes`, `clipVector` | `b3World_CastMover`, `b3World_CollideMover`, `b3SolvePlanes`, `b3ClipVector` |
 | `Body.createMesh({ vertices, indices })` | `b3CreateMesh`, `b3CreateMeshShape` |
 | `Body.createHeightField({ heights, countX, countZ, scale, ... })` | `b3CreateHeightField`, `b3CreateHeightFieldShape` |

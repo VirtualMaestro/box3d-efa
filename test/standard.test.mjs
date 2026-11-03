@@ -408,3 +408,14 @@ test('motion locks restrict movement', () => {
   world.destroy();
   world.delete();
 });
+
+test('integer options beyond int32 saturate, as val::as<int> did; NaN gives 0', () => {
+  const world = new b3.World();
+  const body = world.createBody({ type: 'dynamic' });
+  const group = v => body.createSphere({ radius: 0.1, filter: { groupIndex: v } }).getFilter().groupIndex;
+  const max = 2147483647, min = -2147483648;
+  assert.deepEqual([3e9, 2 ** 31, 0xffffffff, Infinity].map(group), [max, max, max, max]);
+  assert.deepEqual([-3e9, -(2 ** 31) - 1, -Infinity].map(group), [min, min, min]);
+  assert.deepEqual([NaN, 'x', -2.7, 2.7, '7', true, -0].map(group), [0, 0, -2, 2, 7, 1, 0]);
+  world.destroy();
+});

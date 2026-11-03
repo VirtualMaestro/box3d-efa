@@ -293,3 +293,13 @@ test('moverBatch: a mask leaves a layer out, as castMover with maskBits', () => 
   assert.ok(f[0] < 0.5 && f[4] === 1 && f[8] === f[0], `fractions ${f[0]} ${f[4]} ${f[8]}`);
   world.destroy();
 });
+
+test('flat calls: a count whose words pass 2^32 gives nothing (the bound is not fooled by a wrapped product)', () => {
+  const { world } = level();
+  writeIn([[U(0), U(0), 0, 0, 0, 5, 0, 0, -10, 0, 0, U(0)], [U(0), U(0), 0, 0, 0, 5, 0, 0, -10, 0, 0, U(0)]]);
+  // 12 * 357913942 = 2^32 + 8 and 20 * 214748365 = 2^32 + 4: in 32 bits 8 and 4 words, within any input.
+  assert.equal(world.queryBatch(357913942), 0);
+  assert.equal(world.writeBodies(357913942), 0);
+  assert.equal(world.moverBatch(214748365), 0);
+  world.destroy();
+});
