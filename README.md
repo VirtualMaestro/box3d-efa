@@ -2,8 +2,8 @@
 
 ## This fork
 
-This is a fork of [monteslu/box3d-wasm](https://github.com/monteslu/box3d-wasm). Its default branch `efa` is the
-Box3D binding used by the physics adapter of the EFA project (a data-oriented TypeScript ECS). It adds to the embind
+This is a fork of [monteslu/box3d-wasm](https://github.com/monteslu/box3d-wasm). Its default branch `main` is the
+Box3D binding used by the physics adapter of the EFA project. It adds to the embind
 glue (`csrc/glue.cpp`; Box3D's C code is not changed):
 
 | JS | C |
@@ -30,8 +30,8 @@ opt-in flavours `scalar` (no wasm SIMD) and `legacy` (scalar, WebAssembly MVP, n
 `FLAVOURS="standard scalar" npm run build`. `npm run fetch-deps` applies `scripts/box3d-simd.patch` to the pinned
 Box3D, so the scalar flavours carry no SIMD; the Box3D pin is unchanged.
 
-Each feature also sits on its own `pr/*` branch against upstream `main` (`2f2f97ae`), built and tested alone.
-`main` stays equal to upstream.
+Each of the first eight features also sits on its own `pr/*` branch against upstream `main` (`2f2f97ae`), built
+and tested alone. Upstream is `monteslu/box3d-wasm` `main`.
 
 [![npm version](https://img.shields.io/npm/v/box3d-wasm.svg)](https://www.npmjs.com/package/box3d-wasm)
 [![CI](https://github.com/monteslu/box3d-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/monteslu/box3d-wasm/actions/workflows/ci.yml)
