@@ -25,6 +25,10 @@ The glue reads an argument object's vector or quaternion, and builds a result ob
 and makes each property key's JS string once: an object call crosses between JS and WebAssembly a few times instead of
 tens. The API is unchanged; on Node the object calls take 0.12x to 0.67x of their former time, the flat calls less.
 
+A second `destroy()` of a body, shape, joint or world does nothing (before, a stale id destroyed whatever held its
+slot). `test/reference.test.mjs` runs seeded scenarios of object calls on this build and on a reference build of
+an earlier glue and compares every result: `B3_REFERENCE=<reference dist/> npm test` (skipped without it).
+
 World queries leave sensor shapes out unless the filter has `includeSensors: true`. `scripts/build.sh` also has the
 opt-in flavours `scalar` (no wasm SIMD) and `legacy` (scalar, WebAssembly MVP, no BigInt; needs emsdk 3.1.74):
 `FLAVOURS="standard scalar" npm run build`. `npm run fetch-deps` applies `scripts/box3d-simd.patch` to the pinned

@@ -578,9 +578,14 @@ struct Shape
 		return b3Shape_IsValid( id );
 	}
 
+	// A second destroy (or one after the body went) does nothing: Box3D checks ids only in debug builds, and a stale id
+	// writes into whatever now holds its slot.
 	void destroy( bool updateBodyMass )
 	{
-		b3DestroyShape( id, updateBodyMass );
+		if ( b3Shape_IsValid( id ) )
+		{
+			b3DestroyShape( id, updateBodyMass );
+		}
 		id = b3_nullShapeId;
 	}
 
@@ -768,9 +773,13 @@ struct Joint
 		return b3Joint_IsValid( id );
 	}
 
+	// A second destroy (or one after a body took the joint along) does nothing, as for shapes.
 	void destroy( bool wakeAttached )
 	{
-		b3DestroyJoint( id, wakeAttached );
+		if ( b3Joint_IsValid( id ) )
+		{
+			b3DestroyJoint( id, wakeAttached );
+		}
 		id = b3_nullJointId;
 	}
 
@@ -1220,9 +1229,13 @@ struct Body
 		return b3Body_IsValid( id );
 	}
 
+	// A second destroy does nothing, as for shapes: before, it destroyed whatever held slot 0 of world 0.
 	void destroy()
 	{
-		b3DestroyBody( id );
+		if ( b3Body_IsValid( id ) )
+		{
+			b3DestroyBody( id );
+		}
 		id = b3_nullBodyId;
 	}
 
@@ -1747,7 +1760,7 @@ struct World
 			b3RecPlayer_Destroy( player );
 			player = nullptr;
 		}
-		else
+		else if ( b3World_IsValid( id ) )
 		{
 			b3DestroyWorld( id );
 		}

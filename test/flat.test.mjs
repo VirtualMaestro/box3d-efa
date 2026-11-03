@@ -254,3 +254,42 @@ test('moverBatch: a move equals the loop over collideMover, solvePlanes and cast
   assert.ok(wall.getIndex() > 0);
   world.destroy();
 });
+
+test('flat calls: the memory grows during a call, the results read through new views are right', () => {
+  const { world } = level();
+  // An overlap of radius 3 at the grid: about ten shapes a query, so 400 000 queries write far more than the module's
+  // first memory, and the output grows inside the call.
+  const one = [U(2), U(SPHERE), 3, 0, 0, 0.7, 0, 0, 0, 0, 0, U(0)];
+  writeIn([one]);
+  const words = world.queryBatch(1);
+  const want = [...out(words).u];
+  assert.ok(want[0] >= 5, `only ${want[0]} shapes`);
+  const before = b3.HEAPU32;
+  const n = 400000;
+  writeIn(Array.from({ length: n }, () => one));
+  const total = world.queryBatch(n);
+  assert.equal(total, n * words);
+  assert.equal(before.length, 0, 'the old view was detached: the memory grew');
+  const u = b3.HEAPU32, at = b3.flatOut() >> 2;
+  for (const i of [0, 1, n >> 1, n - 1]) assert.deepEqual([...u.subarray(at + i * words, at + (i + 1) * words)], want, `query ${i}`);
+  world.destroy();
+});
+
+test('moverBatch: a mask leaves a layer out, as castMover with maskBits', () => {
+  const world = new b3.World({ gravity: { x: 0, y: -10, z: 0 } });
+  const floor = world.createBody({ type: 'static', position: { x: 0, y: -0.5, z: 0 } });
+  floor.createBox({ halfExtents: { x: 10, y: 0.5, z: 10 } });
+  const wall = world.createBody({ type: 'static', position: { x: 5, y: 0.5, z: 0 } });
+  wall.createBox({ halfExtents: { x: 0.5, y: 0.5, z: 0.5 }, filter: { categoryBits: 2, maskBits: 0xffffffff, groupIndex: 0 } });
+  const capsule = { center1: { x: 0, y: -0.5, z: 0 }, center2: { x: 0, y: 0.5, z: 0 }, radius: 0.3 };
+  const at = { x: 0, y: 0.81, z: 0 }, along = { x: 10, y: 0, z: 0 };
+  const rec = (flags, mask) => [U(1), U(flags), at.x, at.y, at.z, 0, -0.5, 0, 0, 0.5, 0, 0.3, along.x, along.y, along.z, 0, U(mask), U(0), U(0), U(0)];
+  writeIn([rec(0, 0), rec(4, 1), rec(4, 2)]);
+  assert.equal(world.moverBatch(3), 3);
+  const { f } = out(12);
+  assert.equal(f[0], Math.fround(world.castMover(at, capsule, along, undefined)));
+  assert.equal(f[4], Math.fround(world.castMover(at, capsule, along, { maskBits: 1 })));
+  assert.equal(f[8], Math.fround(world.castMover(at, capsule, along, { maskBits: 2 })));
+  assert.ok(f[0] < 0.5 && f[4] === 1 && f[8] === f[0], `fractions ${f[0]} ${f[4]} ${f[8]}`);
+  world.destroy();
+});
