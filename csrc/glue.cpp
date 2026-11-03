@@ -1124,6 +1124,38 @@ struct Body
 		return shape;
 	}
 
+	// A triangle mesh from flat arrays (vertices: x y z per vertex; indices: three per triangle), for static terrain: Box3D
+	// meshes collide with static bodies only. Box3D keeps a pointer to the mesh data, so it is never freed.
+	Shape createMesh( val opts )
+	{
+		b3ShapeDef def = shapeDefFromOpts( opts );
+		val vs = opts["vertices"], is = opts["indices"];
+		int nv = vs["length"].as<int>() / 3, ni = is["length"].as<int>();
+		std::vector<b3Vec3> vertices( nv );
+		for ( int i = 0; i < nv; ++i )
+			vertices[i] = { vs[3 * i].as<float>(), vs[3 * i + 1].as<float>(), vs[3 * i + 2].as<float>() };
+		std::vector<int32_t> indices( ni );
+		for ( int i = 0; i < ni; ++i )
+			indices[i] = is[i].as<int32_t>();
+		std::vector<uint8_t> materials( ni / 3, 0 );
+		b3MeshDef md = {};
+		md.vertices = vertices.data();
+		md.indices = indices.data();
+		md.materialIndices = materials.data();
+		md.vertexCount = nv;
+		md.triangleCount = ni / 3;
+		md.useMedianSplit = true;
+		md.identifyEdges = true;
+		b3MeshData* mesh = b3CreateMesh( &md, nullptr, 0 );
+		if ( mesh == nullptr )
+		{
+			Shape shape = { b3_nullShapeId };
+			return shape;
+		}
+		Shape shape = { b3CreateMeshShape( id, &def, mesh, { 1.0f, 1.0f, 1.0f } ) };
+		return shape;
+	}
+
 	Shape createHull( val opts )
 	{
 		b3ShapeDef def = shapeDefFromOpts( opts );
@@ -1711,7 +1743,8 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "createSphere", &Body::createSphere )
 		.function( "createCapsule", &Body::createCapsule )
 		.function( "createBox", &Body::createBox )
-		.function( "createHull", &Body::createHull );
+		.function( "createHull", &Body::createHull )
+		.function( "createMesh", &Body::createMesh );
 
 	class_<Shape>( "Shape" )
 		.function( "isValid", &Shape::isValid )
