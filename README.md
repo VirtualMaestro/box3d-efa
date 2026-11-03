@@ -19,7 +19,7 @@ glue (`csrc/glue.cpp`; Box3D's C code is not changed):
 | `World.save()`, `World.restore(bytes)`, `World.getBody(index, generation)`, `Body.getIndex()`, `Body.getGeneration()` | `b3World_StartRecording`, `b3World_StopRecording`, `b3RecPlayer_Create` |
 | `World.getJointEvents()`, `Joint.setForceThreshold`, `Joint.setTorqueThreshold`, `Joint.getIndex()` | `b3World_GetJointEvents`, `b3Joint_SetForceThreshold`, `b3Joint_SetTorqueThreshold` |
 | `Shape.getContactData()` | `b3Shape_GetContactCapacity`, `b3Shape_GetContactData` |
-| `flatIn(words)`, `flatOut()`, `World.queryBatch(count)`, `World.readMoved()`, `World.readEvents()`, `World.writeBodies(count)` | the flat calls: records of 32-bit words in the module's memory, no JS objects (queries; moved bodies with their velocities; contact and sensor events; velocity, transform, target transform and impulse writes). Layouts in `csrc/glue.cpp`, "Flat calls" |
+| `flatIn(words)`, `flatOut()`, `World.queryBatch(count)`, `World.readMoved()`, `World.readEvents()`, `World.writeBodies(count)`, `World.moverBatch(count)` | the flat calls: records of 32-bit words in the module's memory, no JS objects (queries; moved bodies with their velocities; contact and sensor events; velocity, transform, target transform and impulse writes; a mover's move of up to five collide, solve and cast rounds, a mover cast, the ground under a mover). Layouts in `csrc/glue.cpp`, "Flat calls" |
 
 The glue reads an argument object's vector or quaternion, and builds a result object, in one call into JS (`EM_JS`),
 and makes each property key's JS string once: an object call crosses between JS and WebAssembly a few times instead of

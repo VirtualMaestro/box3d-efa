@@ -452,6 +452,29 @@ struct PlaneContext
 	int count;
 };
 
+// The planes a mover touches, kept in C for World.moverBatch: each plane with the shape it came from.
+struct PlaneList
+{
+	bool includeSensors;
+	std::vector<b3PlaneResult> planes;
+	std::vector<b3ShapeId> shapes;
+};
+
+static bool planeListFcn( b3ShapeId shapeId, const b3PlaneResult* planes, int planeCount, void* context )
+{
+	PlaneList* c = (PlaneList*)context;
+	if ( !c->includeSensors && b3Shape_IsSensor( shapeId ) )
+	{
+		return true;
+	}
+	for ( int i = 0; i < planeCount; ++i )
+	{
+		c->planes.push_back( planes[i] );
+		c->shapes.push_back( shapeId );
+	}
+	return true;
+}
+
 static bool planeFcn( b3ShapeId shapeId, const b3PlaneResult* planes, int planeCount, void* context )
 {
 	PlaneContext* c = (PlaneContext*)context;
@@ -2342,6 +2365,115 @@ struct World
 		return c.out;
 	}
 
+	// Mover calls without JS objects (see "Flat calls"), 20 words each at flatIn:
+	//   0 kind: 0 move (b3World_CollideMover, b3SolvePlanes, b3World_CastMover in rounds, as Box2D's character sample
+	//     loops them), 1 cast (b3World_CastMover), 2 ground (of the planes the capsule touches, the first one whose
+	//     normal points most up, at or above word 15)
+	//   1 flags: bit 0 a move lays each plane whose normal y is below word 15 flat (a wall: the normal's horizontal part
+	//     at unit length, the offset kept), bit 1 include sensors, bit 2 word 16 holds the mask bits
+	//   2-4 the capsule's position, 5-7 and 8-10 its centers (relative to the position), 11 its radius (floats)
+	//   12-14 the translation (move, cast), 15 the least normal y (move with bit 0, ground), floats
+	//   16 the mask bits, the low 32; 17 a move's most rounds (0: 5); 18, 19 unused
+	// A move aims at the position plus the translation; each round solves the planes for what is left, casts that
+	// and moves by the fraction cast; it stops when a round moves less than 1e-4. The positions are kept in doubles
+	// between rounds, as a JS loop over the object calls keeps them.
+	// Results, 4 words each at flatOut: move: the end position (3 floats) and the rounds run; cast: the fraction, then
+	// zeros; ground: found (0 or 1), the body's index and generation, the normal's y (float). Returns the records
+	// answered; a record of an unknown kind ends the batch there.
+	int moverBatch( int count ) const
+	{
+		g_flatOut.clear();
+		if ( count < 0 || 20 * count > (int)g_flatIn.size() )
+		{
+			return 0;
+		}
+		int answered = 0;
+		std::vector<b3CollisionPlane> planes;
+		for ( int i = 0; i < count; ++i )
+		{
+			const FlatWord* r = g_flatIn.data() + 20 * i;
+			uint32_t kind = r[0].u, flags = r[1].u;
+			bool includeSensors = ( flags & 2 ) != 0;
+			b3QueryFilter filter = b3DefaultQueryFilter();
+			if ( flags & 4 )
+			{
+				filter.maskBits = r[16].u;
+			}
+			b3Capsule capsule = { { r[5].f, r[6].f, r[7].f }, { r[8].f, r[9].f, r[10].f }, r[11].f };
+			b3Vec3 at = { r[2].f, r[3].f, r[4].f }, along = { r[12].f, r[13].f, r[14].f };
+			float minY = r[15].f;
+			if ( kind == 0 )
+			{
+				int rounds = r[17].u == 0 ? 5 : (int)r[17].u, run = 0;
+				double px = at.x, py = at.y, pz = at.z;
+				double tx = px + along.x, ty = py + along.y, tz = pz + along.z;
+				while ( run < rounds )
+				{
+					++run;
+					b3Vec3 p = { (float)px, (float)py, (float)pz };
+					PlaneList found = { includeSensors, {}, {} };
+					b3World_CollideMover( id, p, &capsule, filter, planeListFcn, &found );
+					planes.clear();
+					for ( const b3PlaneResult& pr : found.planes )
+					{
+						b3CollisionPlane cp = { pr.plane, FLT_MAX, 0.0f, true };
+						double h = std::hypot( (double)pr.plane.normal.x, (double)pr.plane.normal.z );
+						if ( ( flags & 1 ) && pr.plane.normal.y < minY && h > 1e-6 )
+						{
+							cp.plane.normal = { (float)( pr.plane.normal.x / h ), 0.0f, (float)( pr.plane.normal.z / h ) };
+						}
+						planes.push_back( cp );
+					}
+					b3Vec3 left = { (float)( tx - px ), (float)( ty - py ), (float)( tz - pz ) };
+					b3Vec3 e = b3SolvePlanes( left, planes.data(), (int)planes.size() ).delta;
+					float f = b3World_CastMover( id, p, &capsule, e, filter, moverFilterFcn, &includeSensors );
+					double mx = (double)f * e.x, my = (double)f * e.y, mz = (double)f * e.z;
+					px += mx;
+					py += my;
+					pz += mz;
+					if ( std::sqrt( mx * mx + my * my + mz * mz ) < 1e-4 )
+					{
+						break;
+					}
+				}
+				putF( (float)px );
+				putF( (float)py );
+				putF( (float)pz );
+				putU( (uint32_t)run );
+			}
+			else if ( kind == 1 )
+			{
+				putF( b3World_CastMover( id, at, &capsule, along, filter, moverFilterFcn, &includeSensors ) );
+				putU( 0 );
+				putU( 0 );
+				putU( 0 );
+			}
+			else if ( kind == 2 )
+			{
+				PlaneList found = { includeSensors, {}, {} };
+				b3World_CollideMover( id, at, &capsule, filter, planeListFcn, &found );
+				int best = -1;
+				for ( int k = 0; k < (int)found.planes.size(); ++k )
+				{
+					float y = found.planes[k].plane.normal.y;
+					if ( y >= minY && ( best < 0 || y > found.planes[best].plane.normal.y ) )
+					{
+						best = k;
+					}
+				}
+				putU( best >= 0 ? 1 : 0 );
+				putShapeBody( best >= 0 ? found.shapes[best] : b3_nullShapeId );
+				putF( best >= 0 ? found.planes[best].plane.normal.y : 0.0f );
+			}
+			else
+			{
+				break;
+			}
+			++answered;
+		}
+		return answered;
+	}
+
 	void explode( val opts )
 	{
 		b3ExplosionDef def = b3DefaultExplosionDef();
@@ -2568,6 +2700,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "readMoved", &World::readMoved )
 		.function( "readEvents", &World::readEvents )
 		.function( "writeBodies", &World::writeBodies )
+		.function( "moverBatch", &World::moverBatch )
 		.function( "castMover", &World::castMover )
 		.function( "collideMover", &World::collideMover )
 		.function( "explode", &World::explode )

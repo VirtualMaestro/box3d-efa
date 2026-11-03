@@ -12,13 +12,14 @@ const DT = 1 / 60;
 const SUBSTEPS = 4;
 const f32 = Math.fround;
 
-/** Writes records of 12 words (numbers; an integer word is given as { u }) at flatIn. */
+/** Writes records of equal length (numbers; an integer word is given as { u }) at flatIn. */
 function writeIn(records) {
-  const at = b3.flatIn(12 * records.length) >> 2;
+  const n = records[0].length;
+  const at = b3.flatIn(n * records.length) >> 2;
   const u = b3.HEAPU32, f = b3.HEAPF32;
   records.forEach((r, i) => r.forEach((w, j) => {
-    if (typeof w === 'object') u[at + 12 * i + j] = w.u;
-    else f[at + 12 * i + j] = w;
+    if (typeof w === 'object') u[at + n * i + j] = w.u;
+    else f[at + n * i + j] = w;
   }));
 }
 
@@ -198,4 +199,58 @@ test('writeBodies: each op equals its object call; stale and unknown records are
   assert.equal(b.world.writeBodies(1 << 20), 0);
   a.world.destroy();
   b.world.destroy();
+});
+
+test('moverBatch: a move equals the loop over collideMover, solvePlanes and castMover; cast and ground as the object calls', () => {
+  const { world, wall } = level();
+  // A ramp at 35 degrees: a wall for a mover whose least ground normal y is cos 30.
+  const ramp = world.createBody({ type: 'static', position: { x: -2, y: 0, z: 3 }, rotation: { x: 0, y: 0, z: Math.sin(-0.3054), w: Math.cos(-0.3054) } });
+  ramp.createBox({ halfExtents: { x: 2, y: 0.2, z: 1 } });
+  const capsule = { center1: { x: 0, y: -0.5, z: 0 }, center2: { x: 0, y: 0.5, z: 0 }, radius: 0.3 };
+  const minY = Math.fround(Math.cos(Math.PI / 6));
+  const f = Math.fround;
+  // The loop as a JS caller writes it over the object calls, positions in doubles.
+  const loop = (from, d, walls) => {
+    let p = from;
+    let run = 0;
+    for (; run < 5;) {
+      run++;
+      const planes = world.collideMover({ x: p[0], y: p[1], z: p[2] }, capsule, undefined).map(pl => {
+        const n = pl.normal, h = Math.hypot(n.x, n.z), flat = walls && n.y < minY && h > 1e-6;
+        return { normal: flat ? { x: n.x / h, y: 0, z: n.z / h } : n, offset: pl.offset };
+      });
+      const e = b3.solvePlanes({ x: from[0] + d[0] - p[0], y: from[1] + d[1] - p[1], z: from[2] + d[2] - p[2] }, planes).delta;
+      const t = world.castMover({ x: p[0], y: p[1], z: p[2] }, capsule, e, undefined);
+      p = [p[0] + t * e.x, p[1] + t * e.y, p[2] + t * e.z];
+      if (Math.hypot(t * e.x, t * e.y, t * e.z) < 1e-4) break;
+    }
+    return { p, run };
+  };
+  const rec = (kind, flags, at, d) => [U(kind), U(flags), ...at, 0, -0.5, 0, 0, 0.5, 0, 0.3, ...d, minY, U(0), U(0), U(0), U(0)];
+  const moves = [
+    [[0, 0.81, 0], [6, 0, 0], 1], [[0, 0.81, 0], [6, -1, 0], 1], [[0, 0.81, 2.5], [-3, 0, 0], 1], [[0, 0.81, 2.5], [-3, 0, 0], 0],
+    [[-1, 2, 3], [0, -3, 0], 1], [[3, 0.81, 0.5], [3, 0, -1], 1],
+  ].map(([at, d, walls]) => [at.map(f), d.map(f), walls]);
+  writeIn([
+    ...moves.map(([at, d, walls]) => rec(0, walls, at, d)),
+    rec(1, 0, [0, 0.81, 0].map(f), [10, 0, 0]),
+    rec(2, 0, [0, 0.79, 0].map(f), [0, 0, 0]),
+    rec(2, 0, [8, 5, 8].map(f), [0, 0, 0]),
+  ]);
+  assert.equal(world.moverBatch(moves.length + 3), moves.length + 3);
+  const { u, f: o } = out(4 * (moves.length + 3));
+  moves.forEach(([at, d, walls], i) => {
+    const want = loop(at, d, walls === 1);
+    assert.deepEqual([o[4 * i], o[4 * i + 1], o[4 * i + 2]], want.p.map(f), `move ${i}`);
+    assert.equal(u[4 * i + 3], want.run, `move ${i} rounds`);
+  });
+  const c = 4 * moves.length;
+  assert.equal(o[c], f(world.castMover({ x: 0, y: f(0.81), z: 0 }, capsule, { x: 10, y: 0, z: 0 }, undefined)));
+  assert.ok(o[c] > 0 && o[c] < 1, 'stops at a box');
+  assert.equal(u[c + 4], 1, 'the floor under a standing capsule');
+  assert.ok(Math.abs(o[c + 7] - 1) < 1e-3, 'the floor');
+  assert.equal(u[c + 8], 0, 'nothing below a capsule in the air');
+  assert.equal(u[c + 9], 0xffffffff);
+  assert.ok(wall.getIndex() > 0);
+  world.destroy();
 });
