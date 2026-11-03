@@ -11,7 +11,7 @@ glue (`csrc/glue.cpp`; Box3D's C code is not changed):
 | `World.castRay(origin, translation, filter)` | `b3World_CastRay` (closest hit, names the body by index) |
 | `World.castShape(origin, { points, radius }, translation, filter)` | `b3World_CastShape` (closest hit) |
 | `World.overlapShape(origin, { points, radius }, filter)` | `b3World_OverlapShape` (every shape) |
-| `World.closestPoint(target, maxDistance, filter)`, `Shape.getClosestPoint(target)` | an overlap, then `b3Shape_GetClosestPoint` |
+| `World.closestPoint(target, maxDistance, filter)`, `Shape.getClosestPoint(target)` | the broadphase boxes within `maxDistance` (`b3World_OverlapAABB`), then `b3Shape_GetClosestPoint` per shape |
 | `World.castMover`, `World.collideMover`, `solvePlanes`, `clipVector` | `b3World_CastMover`, `b3World_CollideMover`, `b3SolvePlanes`, `b3ClipVector` |
 | `Body.createMesh({ vertices, indices })` | `b3CreateMesh`, `b3CreateMeshShape` |
 | `Body.createHeightField({ heights, countX, countZ, scale, ... })` | `b3CreateHeightField`, `b3CreateHeightFieldShape` |
@@ -19,6 +19,11 @@ glue (`csrc/glue.cpp`; Box3D's C code is not changed):
 | `World.save()`, `World.restore(bytes)`, `World.getBody(index, generation)`, `Body.getIndex()`, `Body.getGeneration()` | `b3World_StartRecording`, `b3World_StopRecording`, `b3RecPlayer_Create` |
 | `World.getJointEvents()`, `Joint.setForceThreshold`, `Joint.setTorqueThreshold`, `Joint.getIndex()` | `b3World_GetJointEvents`, `b3Joint_SetForceThreshold`, `b3Joint_SetTorqueThreshold` |
 | `Shape.getContactData()` | `b3Shape_GetContactCapacity`, `b3Shape_GetContactData` |
+| `flatIn(words)`, `flatOut()`, `World.queryBatch(count)`, `World.readMoved()`, `World.readEvents()`, `World.writeBodies(count)` | the flat calls: records of 32-bit words in the module's memory, no JS objects (queries; moved bodies with their velocities; contact and sensor events; velocity, transform, target transform and impulse writes). Layouts in `csrc/glue.cpp`, "Flat calls" |
+
+The glue reads an argument object's vector or quaternion, and builds a result object, in one call into JS (`EM_JS`),
+and makes each property key's JS string once: an object call crosses between JS and WebAssembly a few times instead of
+tens. The API is unchanged; on Node the object calls take 0.12x to 0.67x of their former time, the flat calls less.
 
 World queries leave sensor shapes out unless the filter has `includeSensors: true`. `scripts/build.sh` also has the
 opt-in flavours `scalar` (no wasm SIMD) and `legacy` (scalar, WebAssembly MVP, no BigInt; needs emsdk 3.1.74):

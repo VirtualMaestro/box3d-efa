@@ -13,103 +13,165 @@
 
 #include <box3d/box3d.h>
 #include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <emscripten/bind.h>
+#include <emscripten/em_js.h>
 #include <emscripten/val.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+using emscripten::EM_VAL;
 using emscripten::val;
 
 // ---------------------------------------------------------------------------
 // val helpers
 // ---------------------------------------------------------------------------
 
+// Every call into JS costs a crossing, and val reads or writes a property by a C string key by decoding the string
+// first (a crossing of its own) and freeing the handle after (another). Reading { x, y, z } the plain way took
+// about 18 crossings. These helpers read a field, a vector or a quaternion in one crossing and build result objects
+// in one; other property access goes through K, which makes each key's JS string once. The JS below is ES5: the
+// legacy flavour loads on Safari 12.
+
+// Property keys as JS strings, made once and kept (string literals: one entry per literal).
+static const val& K( const char* name )
+{
+	static std::unordered_map<const char*, val> keys;
+	auto it = keys.find( name );
+	if ( it == keys.end() )
+	{
+		it = keys.emplace( name, val::u8string( name ) ).first;
+	}
+	return it->second;
+}
+
+// The EM_JS bodies are JavaScript: clang-format leaves them alone.
+// clang-format off
+// o[key] as a number (+v), or fallback when o or o[key] is undefined or null.
+EM_JS( double, b3g_number, ( EM_VAL o, EM_VAL key, double fallback ), {
+	var v = Emval.toValue( o );
+	if ( v === undefined || v === null ) return fallback;
+	v = v[ Emval.toValue( key ) ];
+	return v === undefined || v === null ? fallback : +v;
+} );
+
+// o[key] as an int32 (v | 0, as a number argument to WebAssembly converts), or fallback.
+EM_JS( int, b3g_int, ( EM_VAL o, EM_VAL key, int fallback ), {
+	var v = Emval.toValue( o );
+	if ( v === undefined || v === null ) return fallback;
+	v = v[ Emval.toValue( key ) ];
+	return v === undefined || v === null ? fallback : v | 0;
+} );
+
+// o[key] as 0 or 1 (truthiness), or fallback when o or o[key] is undefined or null.
+EM_JS( int, b3g_bool, ( EM_VAL o, EM_VAL key, int fallback ), {
+	var v = Emval.toValue( o );
+	if ( v === undefined || v === null ) return fallback;
+	v = v[ Emval.toValue( key ) ];
+	return v === undefined || v === null ? fallback : v ? 1 : 0;
+} );
+
+// o[key] (or o itself when key is 0) read as { x, y, z } (n 3) or { x, y, z, w } (n 4) into out; returns a bit per
+// field present (x 1, y 2, z 4, w 8), 0 when the object is undefined or null. Fields not present are left as they are.
+EM_JS( int, b3g_read, ( EM_VAL o, EM_VAL key, float* out, int n ), {
+	var v = Emval.toValue( o );
+	if ( key && v !== undefined && v !== null ) v = v[ Emval.toValue( key ) ];
+	if ( v === undefined || v === null ) return 0;
+	var i = out >> 2, m = 0, f;
+	f = v.x; if ( f !== undefined && f !== null ) { HEAPF32[i] = f; m |= 1; }
+	f = v.y; if ( f !== undefined && f !== null ) { HEAPF32[i + 1] = f; m |= 2; }
+	f = v.z; if ( f !== undefined && f !== null ) { HEAPF32[i + 2] = f; m |= 4; }
+	if ( n === 4 ) { f = v.w; if ( f !== undefined && f !== null ) { HEAPF32[i + 3] = f; m |= 8; } }
+	return m;
+} );
+
+EM_JS( EM_VAL, b3g_vec3, ( float x, float y, float z ), { return Emval.toHandle( { x: x, y: y, z: z } ); } );
+
+EM_JS( EM_VAL, b3g_quat, ( float x, float y, float z, float w ), { return Emval.toHandle( { x: x, y: y, z: z, w: w } ); } );
+
+EM_JS( EM_VAL, b3g_transform, ( float px, float py, float pz, float qx, float qy, float qz, float qw ), {
+	return Emval.toHandle( { position: { x: px, y: py, z: pz }, rotation: { x: qx, y: qy, z: qz, w: qw } } );
+} );
+
+// clang-format on
+
+static EM_VAL keyHandle( const char* key )
+{
+	return key != nullptr ? K( key ).as_handle() : nullptr;
+}
+
 static bool hasKey( const val& o, const char* key )
 {
-	if ( o.isUndefined() || o.isNull() )
-	{
-		return false;
-	}
-	val v = o[key];
-	return !v.isUndefined() && !v.isNull();
+	return b3g_bool( o.as_handle(), K( key ).as_handle(), -1 ) != -1;
 }
 
 static float getFloat( const val& o, const char* key, float fallback )
 {
-	return hasKey( o, key ) ? o[key].as<float>() : fallback;
+	return (float)b3g_number( o.as_handle(), K( key ).as_handle(), fallback );
 }
 
 static int getInt( const val& o, const char* key, int fallback )
 {
-	return hasKey( o, key ) ? o[key].as<int>() : fallback;
+	return b3g_int( o.as_handle(), K( key ).as_handle(), fallback );
 }
 
 static bool getBool( const val& o, const char* key, bool fallback )
 {
-	return hasKey( o, key ) ? o[key].as<bool>() : fallback;
+	return b3g_bool( o.as_handle(), K( key ).as_handle(), fallback ? 1 : 0 ) != 0;
 }
 
 static uint64_t getU64( const val& o, const char* key, uint64_t fallback )
 {
-	// JS numbers are safe up to 2^53. Filter bits rarely need more.
-	return hasKey( o, key ) ? (uint64_t)o[key].as<double>() : fallback;
+	// JS numbers are safe up to 2^53. Filter bits rarely need more. The fallback does not go through a double: the
+	// default bits (2^64 - 1) round to 2^64, which does not convert back (the MVP flavour gave 0).
+	double v = b3g_number( o.as_handle(), K( key ).as_handle(), NAN );
+	return v == v ? (uint64_t)v : fallback;
+}
+
+static b3Vec3 readVec3( const val& o, const char* key, b3Vec3 fallback )
+{
+	b3Vec3 out = fallback;
+	b3g_read( o.as_handle(), keyHandle( key ), &out.x, 3 );
+	return out;
 }
 
 static b3Vec3 toVec3( const val& v, b3Vec3 fallback )
 {
-	if ( v.isUndefined() || v.isNull() )
-	{
-		return fallback;
-	}
-	b3Vec3 out;
-	out.x = hasKey( v, "x" ) ? v["x"].as<float>() : fallback.x;
-	out.y = hasKey( v, "y" ) ? v["y"].as<float>() : fallback.y;
-	out.z = hasKey( v, "z" ) ? v["z"].as<float>() : fallback.z;
-	return out;
+	return readVec3( v, nullptr, fallback );
 }
 
 static b3Vec3 getVec3( const val& o, const char* key, b3Vec3 fallback )
 {
-	return hasKey( o, key ) ? toVec3( o[key], fallback ) : fallback;
+	return readVec3( o, key, fallback );
 }
 
 static val fromVec3( b3Vec3 v )
 {
-	val o = val::object();
-	o.set( "x", v.x );
-	o.set( "y", v.y );
-	o.set( "z", v.z );
-	return o;
+	return val::take_ownership( b3g_vec3( v.x, v.y, v.z ) );
+}
+
+static b3Quat readQuat( const val& o, const char* key, b3Quat fallback )
+{
+	float q[4] = { fallback.v.x, fallback.v.y, fallback.v.z, fallback.s };
+	b3g_read( o.as_handle(), keyHandle( key ), q, 4 );
+	return { { q[0], q[1], q[2] }, q[3] };
 }
 
 static b3Quat toQuat( const val& v, b3Quat fallback )
 {
-	if ( v.isUndefined() || v.isNull() )
-	{
-		return fallback;
-	}
-	b3Quat out;
-	out.v.x = hasKey( v, "x" ) ? v["x"].as<float>() : fallback.v.x;
-	out.v.y = hasKey( v, "y" ) ? v["y"].as<float>() : fallback.v.y;
-	out.v.z = hasKey( v, "z" ) ? v["z"].as<float>() : fallback.v.z;
-	out.s = hasKey( v, "w" ) ? v["w"].as<float>() : fallback.s;
-	return out;
+	return readQuat( v, nullptr, fallback );
 }
 
 static b3Quat getQuat( const val& o, const char* key, b3Quat fallback )
 {
-	return hasKey( o, key ) ? toQuat( o[key], fallback ) : fallback;
+	return readQuat( o, key, fallback );
 }
 
 static val fromQuat( b3Quat q )
 {
-	val o = val::object();
-	o.set( "x", q.v.x );
-	o.set( "y", q.v.y );
-	o.set( "z", q.v.z );
-	o.set( "w", q.s );
-	return o;
+	return val::take_ownership( b3g_quat( q.v.x, q.v.y, q.v.z, q.s ) );
 }
 
 static b3Transform getTransform( const val& o, const char* key )
@@ -117,7 +179,7 @@ static b3Transform getTransform( const val& o, const char* key )
 	b3Transform xf = b3Transform_identity;
 	if ( hasKey( o, key ) )
 	{
-		val t = o[key];
+		val t = o[K( key )];
 		xf.p = getVec3( t, "position", b3Vec3_zero );
 		xf.q = getQuat( t, "rotation", b3Quat_identity );
 	}
@@ -126,10 +188,8 @@ static b3Transform getTransform( const val& o, const char* key )
 
 static val fromTransform( b3Transform xf )
 {
-	val o = val::object();
-	o.set( "position", fromVec3( xf.p ) );
-	o.set( "rotation", fromQuat( xf.q ) );
-	return o;
+	return val::take_ownership(
+		b3g_transform( (float)xf.p.x, (float)xf.p.y, (float)xf.p.z, xf.q.v.x, xf.q.v.y, xf.q.v.z, xf.q.s ) );
 }
 
 static double tagOf( void* userData )
@@ -150,7 +210,7 @@ static b3Filter filterFromOpts( const val& o )
 	b3Filter filter = b3DefaultFilter();
 	if ( hasKey( o, "filter" ) )
 	{
-		val f = o["filter"];
+		val f = o[K( "filter" )];
 		filter.categoryBits = getU64( f, "categoryBits", filter.categoryBits );
 		filter.maskBits = getU64( f, "maskBits", filter.maskBits );
 		filter.groupIndex = getInt( f, "groupIndex", filter.groupIndex );
@@ -179,8 +239,8 @@ static_assert( sizeof( b3Pos ) == sizeof( b3Vec3 ), "the query glue assumes sing
 // B3_MAX_SHAPE_CAST_POINTS points: a sphere is one point with a radius, a capsule two.
 static b3ShapeProxy proxyFromOpts( const val& o, b3Vec3* points )
 {
-	val arr = o["points"];
-	int n = arr["length"].as<int>();
+	val arr = o[K( "points" )];
+	int n = arr[K( "length" )].as<int>();
 	n = n < B3_MAX_SHAPE_CAST_POINTS ? n : B3_MAX_SHAPE_CAST_POINTS;
 	for ( int i = 0; i < n; ++i )
 	{
@@ -200,9 +260,9 @@ static bool includeSensorsOf( const val& filterOpts )
 static void setHitShape( val& o, b3ShapeId shapeId )
 {
 	b3BodyId body = b3Shape_GetBody( shapeId );
-	o.set( "bodyIndex", body.index1 );
-	o.set( "bodyUserData", tagOf( b3Body_GetUserData( body ) ) );
-	o.set( "shapeUserData", tagOf( b3Shape_GetUserData( shapeId ) ) );
+	o.set( K( "bodyIndex" ), body.index1 );
+	o.set( K( "bodyUserData" ), tagOf( b3Body_GetUserData( body ) ) );
+	o.set( K( "shapeUserData" ), tagOf( b3Shape_GetUserData( shapeId ) ) );
 }
 
 struct ClosestCastContext
@@ -233,12 +293,12 @@ static float closestCastFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, floa
 static val closestCastResult( const ClosestCastContext& c )
 {
 	val o = val::object();
-	o.set( "hit", c.hit );
+	o.set( K( "hit" ), c.hit );
 	if ( c.hit )
 	{
-		o.set( "point", fromVec3( c.point ) );
-		o.set( "normal", fromVec3( c.normal ) );
-		o.set( "fraction", c.fraction );
+		o.set( K( "point" ), fromVec3( c.point ) );
+		o.set( K( "normal" ), fromVec3( c.normal ) );
+		o.set( K( "fraction" ), c.fraction );
 		setHitShape( o, c.shapeId );
 	}
 	return o;
@@ -258,6 +318,113 @@ static bool overlapFcn( b3ShapeId shapeId, void* context )
 		c->shapes.push_back( shapeId );
 	}
 	return true;
+}
+
+// The closest point on any shape within maxDistance of target, in one pass: the broadphase boxes within maxDistance,
+// the closest point on each shape in the callback. The same shapes in the same tree order as an overlap with a
+// sphere of radius maxDistance, then the closest point per shape (the two passes this replaced): the same answers,
+// ties included.
+struct ClosestPointContext
+{
+	bool includeSensors;
+	b3Vec3 target;
+	float best;
+	bool hit;
+	b3Vec3 point;
+	b3ShapeId shapeId;
+};
+
+static bool closestPointFcn( b3ShapeId shapeId, void* context )
+{
+	ClosestPointContext* c = (ClosestPointContext*)context;
+	if ( !c->includeSensors && b3Shape_IsSensor( shapeId ) )
+	{
+		return true;
+	}
+	b3Vec3 p = b3Shape_GetClosestPoint( shapeId, c->target );
+	float d = b3Length( b3Sub( p, c->target ) );
+	if ( d <= c->best && ( !c->hit || d < c->best ) )
+	{
+		c->hit = true;
+		c->best = d;
+		c->point = p;
+		c->shapeId = shapeId;
+	}
+	return true;
+}
+
+static ClosestPointContext closestPointOf( b3WorldId world, b3Vec3 t, float maxDistance, b3QueryFilter filter,
+										   bool includeSensors )
+{
+	ClosestPointContext c = { includeSensors, t, maxDistance, false, b3Vec3_zero, b3_nullShapeId };
+	b3AABB box = { { t.x - maxDistance, t.y - maxDistance, t.z - maxDistance },
+				   { t.x + maxDistance, t.y + maxDistance, t.z + maxDistance } };
+	b3World_OverlapAABB( world, box, filter, closestPointFcn, &c );
+	return c;
+}
+
+// ---------------------------------------------------------------------------
+// Flat calls: records of 32-bit words in the module's memory, no JS objects
+// ---------------------------------------------------------------------------
+
+// The batched calls (World.queryBatch, readMoved, readEvents, writeBodies) read their input from one buffer and
+// write their output to another, both in the module's memory: JS asks flatIn(words) for the input's byte offset,
+// writes the records through HEAPU32 or HEAPF32, makes the call, then reads the output at flatOut(). The output is
+// valid until the next flat call; memory can grow during any call, so JS takes HEAPU32 and HEAPF32 again after it.
+// A word is a float or an unsigned integer, as each layout says. Body ids go as an index and a generation.
+union FlatWord
+{
+	float f;
+	uint32_t u;
+};
+
+static std::vector<FlatWord> g_flatIn, g_flatOut;
+
+static int flatIn( int words )
+{
+	if ( words > (int)g_flatIn.size() )
+	{
+		g_flatIn.resize( words );
+	}
+	return (int)(uintptr_t)g_flatIn.data();
+}
+
+static int flatOut()
+{
+	return (int)(uintptr_t)g_flatOut.data();
+}
+
+static void putU( uint32_t u )
+{
+	FlatWord w;
+	w.u = u;
+	g_flatOut.push_back( w );
+}
+
+static void putF( float f )
+{
+	FlatWord w;
+	w.f = f;
+	g_flatOut.push_back( w );
+}
+
+static void putBody( b3BodyId body )
+{
+	putU( (uint32_t)body.index1 );
+	putU( body.generation );
+}
+
+static void putShapeBody( b3ShapeId shape )
+{
+	if ( b3Shape_IsValid( shape ) )
+	{
+		putBody( b3Shape_GetBody( shape ) );
+	}
+	else
+	{
+		putU( UINT32_MAX );
+		putU( UINT32_MAX );
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -295,9 +462,9 @@ static bool planeFcn( b3ShapeId shapeId, const b3PlaneResult* planes, int planeC
 	for ( int i = 0; i < planeCount; ++i )
 	{
 		val o = val::object();
-		o.set( "normal", fromVec3( planes[i].plane.normal ) );
-		o.set( "offset", planes[i].plane.offset );
-		o.set( "point", fromVec3( planes[i].point ) );
+		o.set( K( "normal" ), fromVec3( planes[i].plane.normal ) );
+		o.set( K( "offset" ), planes[i].plane.offset );
+		o.set( K( "point" ), fromVec3( planes[i].point ) );
 		setHitShape( o, shapeId );
 		c->out.set( c->count++, o );
 	}
@@ -307,7 +474,7 @@ static bool planeFcn( b3ShapeId shapeId, const b3PlaneResult* planes, int planeC
 // Planes from { normal, offset, pushLimit (default FLT_MAX: rigid), clipVelocity (default true) }.
 static std::vector<b3CollisionPlane> planesFromArray( const val& arr )
 {
-	int n = arr["length"].as<int>();
+	int n = arr[K( "length" )].as<int>();
 	std::vector<b3CollisionPlane> planes( n );
 	for ( int i = 0; i < n; ++i )
 	{
@@ -328,14 +495,14 @@ static val solvePlanes( val targetDelta, val planesArr )
 	std::vector<b3CollisionPlane> planes = planesFromArray( planesArr );
 	b3PlaneSolverResult r = b3SolvePlanes( toVec3( targetDelta, b3Vec3_zero ), planes.data(), (int)planes.size() );
 	val o = val::object();
-	o.set( "delta", fromVec3( r.delta ) );
-	o.set( "iterationCount", r.iterationCount );
+	o.set( K( "delta" ), fromVec3( r.delta ) );
+	o.set( K( "iterationCount" ), r.iterationCount );
 	val push = val::array();
 	for ( size_t i = 0; i < planes.size(); ++i )
 	{
 		push.set( i, planes[i].push );
 	}
-	o.set( "push", push );
+	o.set( K( "push" ), push );
 	return o;
 }
 
@@ -370,7 +537,7 @@ static b3ShapeDef shapeDefFromOpts( const val& o )
 	def.filter = filterFromOpts( o );
 	if ( hasKey( o, "userData" ) )
 	{
-		def.userData = (void*)(uintptr_t)o["userData"].as<double>();
+		def.userData = (void*)(uintptr_t)o[K( "userData" )].as<double>();
 	}
 	return def;
 }
@@ -483,33 +650,33 @@ struct Shape
 		{
 			const b3ContactData& c = data[i];
 			val o = val::object();
-			o.set( "bodyIndexA", b3Shape_GetBody( c.shapeIdA ).index1 );
-			o.set( "bodyIndexB", b3Shape_GetBody( c.shapeIdB ).index1 );
-			o.set( "shapeUserDataA", tagOf( b3Shape_GetUserData( c.shapeIdA ) ) );
-			o.set( "shapeUserDataB", tagOf( b3Shape_GetUserData( c.shapeIdB ) ) );
+			o.set( K( "bodyIndexA" ), b3Shape_GetBody( c.shapeIdA ).index1 );
+			o.set( K( "bodyIndexB" ), b3Shape_GetBody( c.shapeIdB ).index1 );
+			o.set( K( "shapeUserDataA" ), tagOf( b3Shape_GetUserData( c.shapeIdA ) ) );
+			o.set( K( "shapeUserDataB" ), tagOf( b3Shape_GetUserData( c.shapeIdB ) ) );
 			val manifolds = val::array();
 			for ( int m = 0; m < c.manifoldCount; ++m )
 			{
 				const b3Manifold& mf = c.manifolds[m];
 				val mo = val::object();
-				mo.set( "normal", fromVec3( mf.normal ) );
+				mo.set( K( "normal" ), fromVec3( mf.normal ) );
 				val points = val::array();
 				for ( int k = 0; k < mf.pointCount; ++k )
 				{
 					const b3ManifoldPoint& mp = mf.points[k];
 					val po = val::object();
-					po.set( "anchorA", fromVec3( mp.anchorA ) );
-					po.set( "anchorB", fromVec3( mp.anchorB ) );
-					po.set( "separation", mp.separation );
-					po.set( "normalImpulse", mp.normalImpulse );
-					po.set( "totalNormalImpulse", mp.totalNormalImpulse );
-					po.set( "normalVelocity", mp.normalVelocity );
+					po.set( K( "anchorA" ), fromVec3( mp.anchorA ) );
+					po.set( K( "anchorB" ), fromVec3( mp.anchorB ) );
+					po.set( K( "separation" ), mp.separation );
+					po.set( K( "normalImpulse" ), mp.normalImpulse );
+					po.set( K( "totalNormalImpulse" ), mp.totalNormalImpulse );
+					po.set( K( "normalVelocity" ), mp.normalVelocity );
 					points.set( k, po );
 				}
-				mo.set( "points", points );
+				mo.set( K( "points" ), points );
 				manifolds.set( m, mo );
 			}
-			o.set( "manifolds", manifolds );
+			o.set( K( "manifolds" ), manifolds );
 			out.set( i, o );
 		}
 		return out;
@@ -524,9 +691,9 @@ struct Shape
 	{
 		b3Filter f = b3Shape_GetFilter( id );
 		val o = val::object();
-		o.set( "categoryBits", (double)f.categoryBits );
-		o.set( "maskBits", (double)f.maskBits );
-		o.set( "groupIndex", f.groupIndex );
+		o.set( K( "categoryBits" ), (double)f.categoryBits );
+		o.set( K( "maskBits" ), (double)f.maskBits );
+		o.set( K( "groupIndex" ), f.groupIndex );
 		return o;
 	}
 
@@ -543,8 +710,8 @@ struct Shape
 	{
 		b3AABB aabb = b3Shape_GetAABB( id );
 		val o = val::object();
-		o.set( "lowerBound", fromVec3( aabb.lowerBound ) );
-		o.set( "upperBound", fromVec3( aabb.upperBound ) );
+		o.set( K( "lowerBound" ), fromVec3( aabb.lowerBound ) );
+		o.set( K( "upperBound" ), fromVec3( aabb.upperBound ) );
 		return o;
 	}
 
@@ -558,12 +725,12 @@ struct Shape
 	{
 		b3WorldCastOutput out = b3Shape_RayCast( id, toVec3( origin, b3Vec3_zero ), toVec3( translation, b3Vec3_zero ) );
 		val o = val::object();
-		o.set( "hit", out.hit );
+		o.set( K( "hit" ), out.hit );
 		if ( out.hit )
 		{
-			o.set( "point", fromVec3( out.point ) );
-			o.set( "normal", fromVec3( out.normal ) );
-			o.set( "fraction", out.fraction );
+			o.set( K( "point" ), fromVec3( out.point ) );
+			o.set( K( "normal" ), fromVec3( out.normal ) );
+			o.set( K( "fraction" ), out.fraction );
 		}
 		return o;
 	}
@@ -1294,12 +1461,12 @@ struct Body
 	{
 		b3MotionLocks ml = b3Body_GetMotionLocks( id );
 		val o = val::object();
-		o.set( "linearX", ml.linearX );
-		o.set( "linearY", ml.linearY );
-		o.set( "linearZ", ml.linearZ );
-		o.set( "angularX", ml.angularX );
-		o.set( "angularY", ml.angularY );
-		o.set( "angularZ", ml.angularZ );
+		o.set( K( "linearX" ), ml.linearX );
+		o.set( K( "linearY" ), ml.linearY );
+		o.set( K( "linearZ" ), ml.linearZ );
+		o.set( K( "angularX" ), ml.angularX );
+		o.set( K( "angularY" ), ml.angularY );
+		o.set( K( "angularZ" ), ml.angularZ );
 		return o;
 	}
 
@@ -1312,8 +1479,8 @@ struct Body
 	{
 		b3AABB aabb = b3Body_ComputeAABB( id );
 		val o = val::object();
-		o.set( "lowerBound", fromVec3( aabb.lowerBound ) );
-		o.set( "upperBound", fromVec3( aabb.upperBound ) );
+		o.set( K( "lowerBound" ), fromVec3( aabb.lowerBound ) );
+		o.set( K( "upperBound" ), fromVec3( aabb.upperBound ) );
 		return o;
 	}
 
@@ -1338,7 +1505,7 @@ struct Body
 		{
 			// height is the segment length between the two hemisphere centers,
 			// aligned with the local y axis.
-			float half = 0.5f * opts["height"].as<float>();
+			float half = 0.5f * opts[K( "height" )].as<float>();
 			capsule.center1 = { 0.0f, -half, 0.0f };
 			capsule.center2 = { 0.0f, half, 0.0f };
 		}
@@ -1359,7 +1526,7 @@ struct Body
 		b3Vec3 he = { 0.5f, 0.5f, 0.5f };
 		if ( hasKey( opts, "halfExtents" ) )
 		{
-			he = toVec3( opts["halfExtents"], he );
+			he = toVec3( opts[K( "halfExtents" )], he );
 		}
 		else if ( hasKey( opts, "hx" ) || hasKey( opts, "hy" ) || hasKey( opts, "hz" ) )
 		{
@@ -1389,8 +1556,8 @@ struct Body
 	Shape createMesh( val opts )
 	{
 		b3ShapeDef def = shapeDefFromOpts( opts );
-		val vs = opts["vertices"], is = opts["indices"];
-		int nv = vs["length"].as<int>() / 3, ni = is["length"].as<int>();
+		val vs = opts[K( "vertices" )], is = opts[K( "indices" )];
+		int nv = vs[K( "length" )].as<int>() / 3, ni = is[K( "length" )].as<int>();
 		std::vector<b3Vec3> vertices( nv );
 		for ( int i = 0; i < nv; ++i )
 			vertices[i] = { vs[3 * i].as<float>(), vs[3 * i + 1].as<float>(), vs[3 * i + 2].as<float>() };
@@ -1420,8 +1587,8 @@ struct Body
 	{
 		b3ShapeDef def = shapeDefFromOpts( opts );
 		std::vector<b3Vec3> points;
-		val arr = opts["points"];
-		int n = arr["length"].as<int>();
+		val arr = opts[K( "points" )];
+		int n = arr[K( "length" )].as<int>();
 		points.reserve( n );
 		for ( int i = 0; i < n; ++i )
 		{
@@ -1448,7 +1615,7 @@ struct Body
 	Shape createHeightField( val opts )
 	{
 		b3ShapeDef def = shapeDefFromOpts( opts );
-		std::vector<float> heights = emscripten::convertJSArrayToNumberVector<float>( opts["heights"] );
+		std::vector<float> heights = emscripten::convertJSArrayToNumberVector<float>( opts[K( "heights" )] );
 		b3HeightFieldDef hd = {};
 		hd.countX = getInt( opts, "countX", 0 );
 		hd.countZ = getInt( opts, "countZ", 0 );
@@ -1466,7 +1633,7 @@ struct Body
 		std::vector<uint8_t> materials;
 		if ( hasKey( opts, "materialIndices" ) )
 		{
-			materials = emscripten::convertJSArrayToNumberVector<uint8_t>( opts["materialIndices"] );
+			materials = emscripten::convertJSArrayToNumberVector<uint8_t>( opts[K( "materialIndices" )] );
 		}
 		hd.heights = heights.data();
 		hd.materialIndices = (int)materials.size() == ( hd.countX - 1 ) * ( hd.countZ - 1 ) ? materials.data() : nullptr;
@@ -1645,7 +1812,7 @@ struct World
 		{
 			if ( hasKey( opts, "type" ) )
 			{
-				std::string type = opts["type"].as<std::string>();
+				std::string type = opts[K( "type" )].as<std::string>();
 				if ( type == "dynamic" )
 				{
 					def.type = b3_dynamicBody;
@@ -1675,7 +1842,7 @@ struct World
 			def.enableContactRecycling = getBool( opts, "enableContactRecycling", def.enableContactRecycling );
 			if ( hasKey( opts, "motionLocks" ) )
 			{
-				val locks = opts["motionLocks"];
+				val locks = opts[K( "motionLocks" )];
 				def.motionLocks.linearX = getBool( locks, "linearX", false );
 				def.motionLocks.linearY = getBool( locks, "linearY", false );
 				def.motionLocks.linearZ = getBool( locks, "linearZ", false );
@@ -1685,11 +1852,11 @@ struct World
 			}
 			if ( hasKey( opts, "userData" ) )
 			{
-				def.userData = (void*)(uintptr_t)opts["userData"].as<double>();
+				def.userData = (void*)(uintptr_t)opts[K( "userData" )].as<double>();
 			}
 			if ( hasKey( opts, "name" ) )
 			{
-				name = opts["name"].as<std::string>();
+				name = opts[K( "name" )].as<std::string>();
 				def.name = name.c_str();
 			}
 		}
@@ -1865,16 +2032,16 @@ struct World
 		b3RayResult result = b3World_CastRayClosest( id, toVec3( origin, b3Vec3_zero ), toVec3( translation, b3Vec3_zero ),
 													 queryFilterFromOpts( filterOpts ) );
 		val o = val::object();
-		o.set( "hit", result.hit );
+		o.set( K( "hit" ), result.hit );
 		if ( result.hit )
 		{
-			o.set( "point", fromVec3( result.point ) );
-			o.set( "normal", fromVec3( result.normal ) );
-			o.set( "fraction", result.fraction );
-			o.set( "shapeUserData", tagOf( b3Shape_GetUserData( result.shapeId ) ) );
-			o.set( "bodyUserData", tagOf( b3Body_GetUserData( b3Shape_GetBody( result.shapeId ) ) ) );
+			o.set( K( "point" ), fromVec3( result.point ) );
+			o.set( K( "normal" ), fromVec3( result.normal ) );
+			o.set( K( "fraction" ), result.fraction );
+			o.set( K( "shapeUserData" ), tagOf( b3Shape_GetUserData( result.shapeId ) ) );
+			o.set( K( "bodyUserData" ), tagOf( b3Body_GetUserData( b3Shape_GetBody( result.shapeId ) ) ) );
 			Shape shape = { result.shapeId };
-			o.set( "shape", val( shape ) );
+			o.set( K( "shape" ), val( shape ) );
 		}
 		return o;
 	}
@@ -1924,36 +2091,235 @@ struct World
 	// shape found first.
 	val closestPoint( val target, float maxDistance, val filterOpts ) const
 	{
-		b3Vec3 t = toVec3( target, b3Vec3_zero );
-		b3Vec3 center = b3Vec3_zero;
-		b3ShapeProxy proxy = { &center, 1, maxDistance };
-		OverlapContext c = { includeSensorsOf( filterOpts ), {} };
-		b3World_OverlapShape( id, t, &proxy, queryFilterFromOpts( filterOpts ), overlapFcn, &c );
-		bool hit = false;
-		float best = maxDistance;
-		b3Vec3 point = b3Vec3_zero;
-		b3ShapeId shape = b3_nullShapeId;
-		for ( b3ShapeId s : c.shapes )
-		{
-			b3Vec3 p = b3Shape_GetClosestPoint( s, t );
-			float d = b3Length( b3Sub( p, t ) );
-			if ( d <= best && ( !hit || d < best ) )
-			{
-				hit = true;
-				best = d;
-				point = p;
-				shape = s;
-			}
-		}
+		ClosestPointContext c = closestPointOf( id, toVec3( target, b3Vec3_zero ), maxDistance, queryFilterFromOpts( filterOpts ),
+												includeSensorsOf( filterOpts ) );
 		val o = val::object();
-		o.set( "hit", hit );
-		if ( hit )
+		o.set( K( "hit" ), c.hit );
+		if ( c.hit )
 		{
-			o.set( "point", fromVec3( point ) );
-			o.set( "distance", best );
-			setHitShape( o, shape );
+			o.set( K( "point" ), fromVec3( c.point ) );
+			o.set( K( "distance" ), c.best );
+			setHitShape( o, c.shapeId );
 		}
 		return o;
+	}
+
+	// `count` queries in one call, without JS objects (see "Flat calls"). A query is 12 words at flatIn:
+	//   0 kind: 0 ray, 1 shape cast, 2 overlap, 3 closest point
+	//   1 flags: bits 0-1 the shape (0 none, 1 sphere: one point, 2 capsule: two points along y), bit 2 include
+	//     sensors, bit 3 word 11 holds the mask bits (else the default filter)
+	//   2 radius, 3 the capsule's half height (floats)
+	//   4-6 the origin (ray, cast, overlap) or the target (closest point), 7-9 the translation (ray, cast), floats
+	//   10 the maximum distance (closest point), float; 11 the mask bits, the low 32 (unsigned)
+	// The results follow each other at flatOut:
+	//   ray, cast: 7 words: hit (0 or 1), fraction, normal (3 floats), the body's index and generation
+	//   closest point: 7 words: hit, distance, point (3 floats), the body's index and generation
+	//   overlap: 1 + 2n words: n, then the index and generation of each shape's body (one entry per shape)
+	// Returns the words written; a query of an unknown kind ends the batch there.
+	int queryBatch( int count ) const
+	{
+		g_flatOut.clear();
+		if ( count < 0 || 12 * count > (int)g_flatIn.size() )
+		{
+			return 0;
+		}
+		for ( int i = 0; i < count; ++i )
+		{
+			const FlatWord* q = g_flatIn.data() + 12 * i;
+			uint32_t kind = q[0].u, flags = q[1].u;
+			bool includeSensors = ( flags & 4 ) != 0;
+			b3QueryFilter filter = b3DefaultQueryFilter();
+			if ( flags & 8 )
+			{
+				filter.maskBits = q[11].u;
+			}
+			b3Vec3 from = { q[4].f, q[5].f, q[6].f };
+			b3Vec3 along = { q[7].f, q[8].f, q[9].f };
+			b3Vec3 points[2] = { b3Vec3_zero, b3Vec3_zero };
+			b3ShapeProxy proxy = { points, 1, q[2].f };
+			if ( ( flags & 3 ) == 2 )
+			{
+				points[0].y = -q[3].f;
+				points[1].y = q[3].f;
+				proxy.count = 2;
+			}
+			if ( kind == 0 || kind == 1 )
+			{
+				ClosestCastContext c = { includeSensors, false, b3_nullShapeId, b3Vec3_zero, b3Vec3_zero, 1.0f };
+				if ( kind == 0 )
+				{
+					b3World_CastRay( id, from, along, filter, closestCastFcn, &c );
+				}
+				else
+				{
+					b3World_CastShape( id, from, &proxy, along, filter, closestCastFcn, &c );
+				}
+				putU( c.hit ? 1 : 0 );
+				putF( c.hit ? c.fraction : 1.0f );
+				putF( c.normal.x );
+				putF( c.normal.y );
+				putF( c.normal.z );
+				putShapeBody( c.shapeId );
+			}
+			else if ( kind == 2 )
+			{
+				OverlapContext c = { includeSensors, {} };
+				b3World_OverlapShape( id, from, &proxy, filter, overlapFcn, &c );
+				putU( (uint32_t)c.shapes.size() );
+				for ( b3ShapeId s : c.shapes )
+				{
+					putBody( b3Shape_GetBody( s ) );
+				}
+			}
+			else if ( kind == 3 )
+			{
+				ClosestPointContext c = closestPointOf( id, from, q[10].f, filter, includeSensors );
+				putU( c.hit ? 1 : 0 );
+				putF( c.best );
+				putF( c.point.x );
+				putF( c.point.y );
+				putF( c.point.z );
+				putShapeBody( c.shapeId );
+			}
+			else
+			{
+				break;
+			}
+		}
+		return (int)g_flatOut.size();
+	}
+
+	// The bodies that moved in the last step (b3World_GetBodyEvents) with their velocities, 16 words each at flatOut:
+	// index, generation, position (3 floats), rotation (x y z w), linear velocity (3), angular velocity (3), fell
+	// asleep (0 or 1). Returns the bodies.
+	int readMoved() const
+	{
+		g_flatOut.clear();
+		b3BodyEvents events = b3World_GetBodyEvents( id );
+		for ( int i = 0; i < events.moveCount; ++i )
+		{
+			const b3BodyMoveEvent& e = events.moveEvents[i];
+			b3Vec3 v = b3Body_GetLinearVelocity( e.bodyId ), w = b3Body_GetAngularVelocity( e.bodyId );
+			putBody( e.bodyId );
+			putF( (float)e.transform.p.x );
+			putF( (float)e.transform.p.y );
+			putF( (float)e.transform.p.z );
+			putF( e.transform.q.v.x );
+			putF( e.transform.q.v.y );
+			putF( e.transform.q.v.z );
+			putF( e.transform.q.s );
+			putF( v.x );
+			putF( v.y );
+			putF( v.z );
+			putF( w.x );
+			putF( w.y );
+			putF( w.z );
+			putU( e.fellAsleep ? 1 : 0 );
+		}
+		return events.moveCount;
+	}
+
+	// The contact and sensor events of the last step, 10 words each at flatOut: kind (1 contact begin, 2 contact
+	// end, 3 sensor begin, 4 sensor end), shape A's index and B's (a sensor event: the sensor, then the visitor), the
+	// index and generation of body A and of body B (both all ones when the shape was destroyed), the normal from A to B
+	// (3 floats: a contact begin's first manifold; zero otherwise). Returns the events.
+	int readEvents() const
+	{
+		g_flatOut.clear();
+		int n = 0;
+		auto put = [&]( uint32_t kind, b3ShapeId a, b3ShapeId b, b3Vec3 normal ) {
+			putU( kind );
+			putU( (uint32_t)a.index1 );
+			putU( (uint32_t)b.index1 );
+			putShapeBody( a );
+			putShapeBody( b );
+			putF( normal.x );
+			putF( normal.y );
+			putF( normal.z );
+			++n;
+		};
+		b3ContactEvents contacts = b3World_GetContactEvents( id );
+		for ( int i = 0; i < contacts.beginCount; ++i )
+		{
+			const b3ContactBeginTouchEvent& e = contacts.beginEvents[i];
+			b3Vec3 normal = b3Vec3_zero;
+			if ( b3Contact_IsValid( e.contactId ) )
+			{
+				b3ContactData data = b3Contact_GetData( e.contactId );
+				if ( data.manifoldCount > 0 )
+				{
+					normal = data.manifolds[0].normal;
+				}
+			}
+			put( 1, e.shapeIdA, e.shapeIdB, normal );
+		}
+		for ( int i = 0; i < contacts.endCount; ++i )
+		{
+			put( 2, contacts.endEvents[i].shapeIdA, contacts.endEvents[i].shapeIdB, b3Vec3_zero );
+		}
+		b3SensorEvents sensors = b3World_GetSensorEvents( id );
+		for ( int i = 0; i < sensors.beginCount; ++i )
+		{
+			put( 3, sensors.beginEvents[i].sensorShapeId, sensors.beginEvents[i].visitorShapeId, b3Vec3_zero );
+		}
+		for ( int i = 0; i < sensors.endCount; ++i )
+		{
+			put( 4, sensors.endEvents[i].sensorShapeId, sensors.endEvents[i].visitorShapeId, b3Vec3_zero );
+		}
+		return n;
+	}
+
+	// `count` body writes in one call, 12 words each at flatIn: op, the body's index and generation, then up to 9
+	// floats. Ops: 0 linear velocity (x y z), 1 angular velocity (x y z), 2 transform (position, rotation x y z w;
+	// b3Body_SetTransform), 3 target transform (position, rotation, time step; wakes the body), 4 linear impulse at
+	// the center (x y z; wakes), 5 angular impulse (x y z; wakes). A record whose body is not valid (destroyed, or an
+	// old generation) or whose op is unknown is skipped. Returns the records applied.
+	int writeBodies( int count ) const
+	{
+		if ( count < 0 || 12 * count > (int)g_flatIn.size() )
+		{
+			return 0;
+		}
+		int applied = 0;
+		for ( int i = 0; i < count; ++i )
+		{
+			const FlatWord* r = g_flatIn.data() + 12 * i;
+			b3BodyId body = { (int32_t)r[1].u, (uint16_t)( id.index1 - 1 ), (uint16_t)r[2].u };
+			if ( r[0].u > 5 || r[2].u > UINT16_MAX || !b3Body_IsValid( body ) )
+			{
+				continue;
+			}
+			b3Vec3 v = { r[3].f, r[4].f, r[5].f };
+			b3Quat q = { { r[6].f, r[7].f, r[8].f }, r[9].f };
+			switch ( r[0].u )
+			{
+				case 0:
+					b3Body_SetLinearVelocity( body, v );
+					break;
+				case 1:
+					b3Body_SetAngularVelocity( body, v );
+					break;
+				case 2:
+					b3Body_SetTransform( body, v, q );
+					break;
+				case 3:
+				{
+					b3WorldTransform xf;
+					xf.p = v;
+					xf.q = q;
+					b3Body_SetTargetTransform( body, xf, r[10].f, true );
+					break;
+				}
+				case 4:
+					b3Body_ApplyLinearImpulseToCenter( body, v, true );
+					break;
+				default:
+					b3Body_ApplyAngularImpulse( body, v, true );
+					break;
+			}
+			++applied;
+		}
+		return applied;
 	}
 
 	// The fraction of translation a capsule mover ({ center1, center2, radius }, relative to origin) can travel
@@ -1997,10 +2363,10 @@ struct World
 		{
 			const b3BodyMoveEvent& e = events.moveEvents[i];
 			val o = val::object();
-			o.set( "userData", tagOf( e.userData ) );
-			o.set( "position", fromVec3( e.transform.p ) );
-			o.set( "rotation", fromQuat( e.transform.q ) );
-			o.set( "fellAsleep", e.fellAsleep );
+			o.set( K( "userData" ), tagOf( e.userData ) );
+			o.set( K( "position" ), fromVec3( e.transform.p ) );
+			o.set( K( "rotation" ), fromQuat( e.transform.q ) );
+			o.set( K( "fellAsleep" ), e.fellAsleep );
 			arr.set( i, o );
 		}
 		return arr;
@@ -2036,11 +2402,11 @@ struct World
 			asleep[i] = e.fellAsleep ? 1 : 0;
 		}
 		val o = val::object();
-		o.set( "count", n );
-		o.set( "bodyIndex", val( emscripten::typed_memory_view( index.size(), index.data() ) ) );
-		o.set( "userData", val( emscripten::typed_memory_view( tags.size(), tags.data() ) ) );
-		o.set( "transform", val( emscripten::typed_memory_view( transform.size(), transform.data() ) ) );
-		o.set( "fellAsleep", val( emscripten::typed_memory_view( asleep.size(), asleep.data() ) ) );
+		o.set( K( "count" ), n );
+		o.set( K( "bodyIndex" ), val( emscripten::typed_memory_view( index.size(), index.data() ) ) );
+		o.set( K( "userData" ), val( emscripten::typed_memory_view( tags.size(), tags.data() ) ) );
+		o.set( K( "transform" ), val( emscripten::typed_memory_view( transform.size(), transform.data() ) ) );
+		o.set( K( "fellAsleep" ), val( emscripten::typed_memory_view( asleep.size(), asleep.data() ) ) );
 		return o;
 	}
 
@@ -2054,11 +2420,11 @@ struct World
 		{
 			const b3ContactBeginTouchEvent& e = events.beginEvents[i];
 			val o = val::object();
-			o.set( "shapeUserDataA", tagOf( b3Shape_GetUserData( e.shapeIdA ) ) );
-			o.set( "shapeUserDataB", tagOf( b3Shape_GetUserData( e.shapeIdB ) ) );
+			o.set( K( "shapeUserDataA" ), tagOf( b3Shape_GetUserData( e.shapeIdA ) ) );
+			o.set( K( "shapeUserDataB" ), tagOf( b3Shape_GetUserData( e.shapeIdB ) ) );
 			begin.set( i, o );
 		}
-		out.set( "begin", begin );
+		out.set( K( "begin" ), begin );
 
 		val end = val::array();
 		for ( int i = 0; i < events.endCount; ++i )
@@ -2067,25 +2433,25 @@ struct World
 			val o = val::object();
 			bool validA = b3Shape_IsValid( e.shapeIdA );
 			bool validB = b3Shape_IsValid( e.shapeIdB );
-			o.set( "shapeUserDataA", validA ? val( tagOf( b3Shape_GetUserData( e.shapeIdA ) ) ) : val::null() );
-			o.set( "shapeUserDataB", validB ? val( tagOf( b3Shape_GetUserData( e.shapeIdB ) ) ) : val::null() );
+			o.set( K( "shapeUserDataA" ), validA ? val( tagOf( b3Shape_GetUserData( e.shapeIdA ) ) ) : val::null() );
+			o.set( K( "shapeUserDataB" ), validB ? val( tagOf( b3Shape_GetUserData( e.shapeIdB ) ) ) : val::null() );
 			end.set( i, o );
 		}
-		out.set( "end", end );
+		out.set( K( "end" ), end );
 
 		val hit = val::array();
 		for ( int i = 0; i < events.hitCount; ++i )
 		{
 			const b3ContactHitEvent& e = events.hitEvents[i];
 			val o = val::object();
-			o.set( "shapeUserDataA", tagOf( b3Shape_GetUserData( e.shapeIdA ) ) );
-			o.set( "shapeUserDataB", tagOf( b3Shape_GetUserData( e.shapeIdB ) ) );
-			o.set( "point", fromVec3( e.point ) );
-			o.set( "normal", fromVec3( e.normal ) );
-			o.set( "approachSpeed", e.approachSpeed );
+			o.set( K( "shapeUserDataA" ), tagOf( b3Shape_GetUserData( e.shapeIdA ) ) );
+			o.set( K( "shapeUserDataB" ), tagOf( b3Shape_GetUserData( e.shapeIdB ) ) );
+			o.set( K( "point" ), fromVec3( e.point ) );
+			o.set( K( "normal" ), fromVec3( e.normal ) );
+			o.set( K( "approachSpeed" ), e.approachSpeed );
 			hit.set( i, o );
 		}
-		out.set( "hit", hit );
+		out.set( K( "hit" ), hit );
 
 		return out;
 	}
@@ -2099,11 +2465,11 @@ struct World
 		for ( int i = 0; i < events.beginCount; ++i )
 		{
 			val o = val::object();
-			o.set( "sensorUserData", tagOf( b3Shape_GetUserData( events.beginEvents[i].sensorShapeId ) ) );
-			o.set( "visitorUserData", tagOf( b3Shape_GetUserData( events.beginEvents[i].visitorShapeId ) ) );
+			o.set( K( "sensorUserData" ), tagOf( b3Shape_GetUserData( events.beginEvents[i].sensorShapeId ) ) );
+			o.set( K( "visitorUserData" ), tagOf( b3Shape_GetUserData( events.beginEvents[i].visitorShapeId ) ) );
 			begin.set( i, o );
 		}
-		out.set( "begin", begin );
+		out.set( K( "begin" ), begin );
 
 		val end = val::array();
 		for ( int i = 0; i < events.endCount; ++i )
@@ -2111,13 +2477,13 @@ struct World
 			val o = val::object();
 			bool validSensor = b3Shape_IsValid( events.endEvents[i].sensorShapeId );
 			bool validVisitor = b3Shape_IsValid( events.endEvents[i].visitorShapeId );
-			o.set( "sensorUserData",
+			o.set( K( "sensorUserData" ),
 				   validSensor ? val( tagOf( b3Shape_GetUserData( events.endEvents[i].sensorShapeId ) ) ) : val::null() );
-			o.set( "visitorUserData",
+			o.set( K( "visitorUserData" ),
 				   validVisitor ? val( tagOf( b3Shape_GetUserData( events.endEvents[i].visitorShapeId ) ) ) : val::null() );
 			end.set( i, o );
 		}
-		out.set( "end", end );
+		out.set( K( "end" ), end );
 
 		return out;
 	}
@@ -2130,8 +2496,8 @@ struct World
 		for ( int i = 0; i < events.count; ++i )
 		{
 			val o = val::object();
-			o.set( "jointIndex", events.jointEvents[i].jointId.index1 );
-			o.set( "userData", tagOf( events.jointEvents[i].userData ) );
+			o.set( K( "jointIndex" ), events.jointEvents[i].jointId.index1 );
+			o.set( K( "userData" ), tagOf( events.jointEvents[i].userData ) );
 			out.set( i, o );
 		}
 		return out;
@@ -2141,10 +2507,10 @@ struct World
 	{
 		b3Profile p = b3World_GetProfile( id );
 		val o = val::object();
-		o.set( "step", p.step );
-		o.set( "pairs", p.pairs );
-		o.set( "collide", p.collide );
-		o.set( "solve", p.solve );
+		o.set( K( "step" ), p.step );
+		o.set( K( "pairs" ), p.pairs );
+		o.set( K( "collide" ), p.collide );
+		o.set( K( "solve" ), p.solve );
 		return o;
 	}
 };
@@ -2165,6 +2531,8 @@ EMSCRIPTEN_BINDINGS( box3d )
 	constant( "maxWorkers", (int)B3_MAX_WORKERS );
 	function( "solvePlanes", &solvePlanes );
 	function( "clipVector", &clipVector );
+	function( "flatIn", &flatIn );
+	function( "flatOut", &flatOut );
 
 	class_<World>( "World" )
 		.constructor<>()
@@ -2196,6 +2564,10 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "castShape", &World::castShape )
 		.function( "overlapShape", &World::overlapShape )
 		.function( "closestPoint", &World::closestPoint )
+		.function( "queryBatch", &World::queryBatch )
+		.function( "readMoved", &World::readMoved )
+		.function( "readEvents", &World::readEvents )
+		.function( "writeBodies", &World::writeBodies )
 		.function( "castMover", &World::castMover )
 		.function( "collideMover", &World::collideMover )
 		.function( "explode", &World::explode )
