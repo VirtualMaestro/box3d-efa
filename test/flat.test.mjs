@@ -349,6 +349,20 @@ test('a ray that starts inside a shape passes it and hits what is behind; a shap
   world.destroy();
 });
 
+test('queryBatch with flag 16: each hit ends in its shape\'s user data, on every kind', () => {
+  const world = new b3.World({ gravity: { x: 0, y: 0, z: 0 } });
+  const body = world.createBody({ type: 'static', position: { x: 5, y: 0, z: 0 } });
+  body.createSphere({ radius: 1 }).setUserData(7);
+  world.step(DT, SUBSTEPS);
+  const q = (kind, shape) => [U(kind), U(16 | shape), shape ? 0.25 : 0, 0, 0, 0, 0, 20, 0, 0, 20, U(0)];
+  writeIn([q(0, 0), q(1, 1), [U(2), U(16 | 1), 9, 0, 0, 0, 0, 0, 0, 0, 0, U(0)], q(3, 0), q(4, 0), q(5, 1)]);
+  const words = world.queryBatch(6);
+  assert.equal(words, 8 + 8 + 4 + 8 + 8 + 8);
+  const { u } = out(words);
+  for (const at of [7, 15, 19, 27, 35, 43]) assert.equal(u[at], 7, `word ${at}`);
+  world.destroy();
+});
+
 test('queryBatch kinds 4 and 5 give every hit: a mask, the shape a ray starts in, a sensor, and the word count', () => {
   const world = new b3.World({ gravity: { x: 0, y: 0, z: 0 } });
   const at = (x, opts = {}) => {

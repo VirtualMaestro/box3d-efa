@@ -2344,7 +2344,8 @@ struct World
 	// `count` queries in one call, without JS objects (see "Flat calls"). A query is 12 words at flatIn:
 	//   0 kind: 0 ray, 1 shape cast, 2 overlap, 3 closest point, 4 ray with every hit, 5 shape cast with every hit
 	//   1 flags: bits 0-1 the shape (0 none, 1 sphere: one point, 2 capsule: two points along y), bit 2 include
-	//     sensors, bit 3 word 11 holds the mask bits (else the default filter)
+	//     sensors, bit 3 word 11 holds the mask bits (else the default filter), bit 4 each hit below ends in one more
+	//     word, its shape's user data, the low 32 bits
 	//   2 radius, 3 the capsule's half height (floats)
 	//   4-6 the origin (ray, cast, overlap) or the target (closest point), 7-9 the translation (rays, casts), floats
 	//   10 the maximum distance (closest point), float; 11 the mask bits, the low 32 (unsigned)
@@ -2366,7 +2367,13 @@ struct World
 		{
 			const FlatWord* q = g_flatIn.data() + 12 * i;
 			uint32_t kind = q[0].u, flags = q[1].u;
-			bool includeSensors = ( flags & 4 ) != 0;
+			bool includeSensors = ( flags & 4 ) != 0, withUserData = ( flags & 16 ) != 0;
+			auto putUserData = [withUserData]( b3ShapeId s ) {
+				if ( withUserData )
+				{
+					putU( b3Shape_IsValid( s ) ? (uint32_t)(uintptr_t)b3Shape_GetUserData( s ) : 0 );
+				}
+			};
 			b3QueryFilter filter = b3DefaultQueryFilter();
 			if ( flags & 8 )
 			{
@@ -2401,6 +2408,7 @@ struct World
 				putF( c.normal.y );
 				putF( c.normal.z );
 				putShapeBody( c.shapeId );
+				putUserData( c.shapeId );
 			}
 			else if ( kind == 2 )
 			{
@@ -2410,6 +2418,7 @@ struct World
 				for ( b3ShapeId s : c.shapes )
 				{
 					putBody( b3Shape_GetBody( s ) );
+					putUserData( s );
 				}
 			}
 			else if ( kind == 4 || kind == 5 )
@@ -2431,6 +2440,7 @@ struct World
 					putF( h.normal.y );
 					putF( h.normal.z );
 					putShapeBody( h.shapeId );
+					putUserData( h.shapeId );
 				}
 			}
 			else if ( kind == 3 )
@@ -2442,6 +2452,7 @@ struct World
 				putF( c.point.y );
 				putF( c.point.z );
 				putShapeBody( c.shapeId );
+				putUserData( c.shapeId );
 			}
 			else
 			{
