@@ -335,6 +335,29 @@ static float allCastFcn( b3ShapeId shapeId, b3Pos, b3Vec3 normal, float fraction
 	return 1.0f;
 }
 
+// World.setCombine: how two shapes' friction or restitution become a contact's, as C functions the solver calls.
+static float combineGeometric( float a, uint64_t, float b, uint64_t )
+{
+	return sqrtf( a * b );
+}
+static float combineAverage( float a, uint64_t, float b, uint64_t )
+{
+	return 0.5f * ( a + b );
+}
+static float combineMin( float a, uint64_t, float b, uint64_t )
+{
+	return a < b ? a : b;
+}
+static float combineMax( float a, uint64_t, float b, uint64_t )
+{
+	return a > b ? a : b;
+}
+static float combineMultiply( float a, uint64_t, float b, uint64_t )
+{
+	return a * b;
+}
+static b3FrictionCallback* const COMBINE_RULES[] = { combineGeometric, combineAverage, combineMin, combineMax, combineMultiply };
+
 static val closestCastResult( const ClosestCastContext& c )
 {
 	val o = val::object();
@@ -755,6 +778,13 @@ struct Shape
 	float getDensity() const
 	{
 		return b3Shape_GetDensity( id );
+	}
+
+	void setRollingResistance( float resistance )
+	{
+		b3SurfaceMaterial material = b3Shape_GetSurfaceMaterial( id );
+		material.rollingResistance = resistance;
+		b3Shape_SetSurfaceMaterial( id, material );
 	}
 
 	void setDensity( float density, bool updateBodyMass )
@@ -1621,6 +1651,13 @@ struct Body
 		b3Body_SetBullet( id, flag );
 	}
 
+	// A contact at rest is recycled and keeps its material. Setting the same mass data clears each contact's cached pose,
+	// so the next step reads the shapes' materials again; the contact goes on, and it ends nothing.
+	void refreshContacts()
+	{
+		b3Body_SetMassData( id, b3Body_GetMassData( id ) );
+	}
+
 	void setMotionLocks( val locks )
 	{
 		b3MotionLocks ml = b3Body_GetMotionLocks( id );
@@ -1965,6 +2002,17 @@ struct World
 	void enableSleeping( bool flag )
 	{
 		b3World_EnableSleeping( id, flag );
+	}
+
+	// The rules by index: 0 geometric mean, 1 average, 2 min, 3 max, 4 multiply. Box3D's own are 0 and 3.
+	void setCombine( int friction, int restitution )
+	{
+		if ( friction < 0 || friction > 4 || restitution < 0 || restitution > 4 )
+		{
+			val::global( "RangeError" ).new_( std::string( "setCombine: a rule is from 0 to 4" ) ).throw_();
+		}
+		b3World_SetFrictionCallback( id, COMBINE_RULES[friction] );
+		b3World_SetRestitutionCallback( id, COMBINE_RULES[restitution] );
 	}
 
 	void enableContinuous( bool flag )
@@ -2939,6 +2987,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "getGravity", &World::getGravity )
 		.function( "setGravity", &World::setGravity )
 		.function( "enableSleeping", &World::enableSleeping )
+		.function( "setCombine", &World::setCombine )
 		.function( "enableContinuous", &World::enableContinuous )
 		.function( "getAwakeBodyCount", &World::getAwakeBodyCount )
 		.function( "getWorkerCount", &World::getWorkerCount )
@@ -3012,6 +3061,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "setGravityScale", &Guarded<&Body::setGravityScale>::call )
 		.function( "isAwake", &Guarded<&Body::isAwake>::call )
 		.function( "setAwake", &Guarded<&Body::setAwake>::call )
+		.function( "refreshContacts", &Guarded<&Body::refreshContacts>::call )
 		.function( "enableSleep", &Guarded<&Body::enableSleep>::call )
 		.function( "isEnabled", &Guarded<&Body::isEnabled>::call )
 		.function( "setEnabled", &Guarded<&Body::setEnabled>::call )
@@ -3039,6 +3089,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "getRestitution", &Guarded<&Shape::getRestitution>::call )
 		.function( "setRestitution", &Guarded<&Shape::setRestitution>::call )
 		.function( "getDensity", &Guarded<&Shape::getDensity>::call )
+		.function( "setRollingResistance", &Guarded<&Shape::setRollingResistance>::call )
 		.function( "setDensity", &Guarded<&Shape::setDensity>::call )
 		.function( "isSensor", &Guarded<&Shape::isSensor>::call )
 		.function( "enableSensorEvents", &Guarded<&Shape::enableSensorEvents>::call )

@@ -1,6 +1,6 @@
 {
   "name": "box3d-efa",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Box3D, Erin Catto's 3D physics engine, compiled to WebAssembly for the EFA project. Built for EFA's needs: no promise of general use or a stable API.",
   "type": "module",
   "main": "dist/entry.mjs",
