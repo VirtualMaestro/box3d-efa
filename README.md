@@ -30,7 +30,7 @@ tens. The API is unchanged; on Node the object calls take 0.12x to 0.67x of thei
 
 A second `destroy()` of a body, shape, joint or world does nothing, and any other method on a handle whose object
 or world was destroyed throws (before, a stale id read or wrote whatever held its slot). `test/reference.test.mjs` runs seeded scenarios of object calls on this build and on a reference build of
-an earlier glue and compares every result: `B3_REFERENCE=<reference dist/> npm test` (skipped without it).
+the files of a previous release and compares every result: `B3_REFERENCE=<folder with the release's files> npm test` (skipped without it).
 
 World queries leave sensor shapes out unless the filter has `includeSensors: true`. `npm run fetch-deps` applies
 `scripts/box3d-simd.patch` to the pinned Box3D, so the `scalar` flavour carries no SIMD.
