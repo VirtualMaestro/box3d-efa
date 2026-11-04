@@ -67,11 +67,24 @@ for FLAVOUR in $FLAVOURS; do
       ;;
   esac
 
+  # The single-threaded flavours: -Os with LTO is as fast as -O3 without it and 38 KB smaller gzipped (the standard
+  # flavour); not measured on the threaded one, which stays at -O3.
+  SIZE_FLAGS=(-Os -flto)
+  OPT_FLAGS="-Os"
+  LTO_FLAGS="-flto"
+  if [ "$FLAVOUR" = "deluxe" ] || [ "$TARGET_TYPE" = "Debug" ]; then
+    SIZE_FLAGS=(-O3)
+    OPT_FLAGS="-O3"
+    LTO_FLAGS=""
+  fi
+
   echo "==> cmake ($FLAVOUR, $TARGET_TYPE)"
-  CFLAGS="${FLAVOUR_FLAGS[*]:-}" emcmake cmake \
+  emcmake cmake \
     -S "$BOX3D_SRC" \
     -B "$CMAKE_BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="$TARGET_TYPE" \
+    -DCMAKE_C_FLAGS="${FLAVOUR_FLAGS[*]:-} $LTO_FLAGS" \
+    -DCMAKE_C_FLAGS_RELEASE="$OPT_FLAGS -DNDEBUG" \
     -DBOX3D_SAMPLES=OFF \
     -DBOX3D_UNIT_TESTS=OFF \
     -DBOX3D_BENCHMARKS=OFF \
@@ -118,9 +131,16 @@ for FLAVOUR in $FLAVOURS; do
       EMCC_OPTS+=(-g3 -gsource-map -sASSERTIONS=2)
       ;;
     *)
-      EMCC_OPTS+=(-O3)
+      EMCC_OPTS+=("${SIZE_FLAGS[@]}")
       ;;
   esac
+
+  # Box3D reads the clock around every stage and every time-of-impact sweep; in WebAssembly each read crosses into
+  # JavaScript. The glue's __wrap_clock_gettime skips it unless enableStepTimers(true) is called. Not on the threaded
+  # flavour: there libc may wait on the clock, and the gain is not measured.
+  if [ "$FLAVOUR" != "deluxe" ]; then
+    EMCC_OPTS+=(-Wl,--wrap=clock_gettime)
+  fi
 
   echo "==> emcc link ($FLAVOUR) -> dist/$BASENAME.mjs"
   em++ "$ROOT/csrc/glue.cpp" "$ROOT/csrc/flat.cpp" "$LIB" \

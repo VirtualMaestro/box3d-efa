@@ -2783,9 +2783,59 @@ struct World
 		o.set( K( "pairs" ), p.pairs );
 		o.set( K( "collide" ), p.collide );
 		o.set( K( "solve" ), p.solve );
+		o.set( K( "solverSetup" ), p.solverSetup );
+		o.set( K( "constraints" ), p.constraints );
+		o.set( K( "prepareConstraints" ), p.prepareConstraints );
+		o.set( K( "integrateVelocities" ), p.integrateVelocities );
+		o.set( K( "warmStart" ), p.warmStart );
+		o.set( K( "solveImpulses" ), p.solveImpulses );
+		o.set( K( "integratePositions" ), p.integratePositions );
+		o.set( K( "relaxImpulses" ), p.relaxImpulses );
+		o.set( K( "applyRestitution" ), p.applyRestitution );
+		o.set( K( "storeImpulses" ), p.storeImpulses );
+		o.set( K( "splitIslands" ), p.splitIslands );
+		o.set( K( "transforms" ), p.transforms );
+		o.set( K( "sensorHits" ), p.sensorHits );
+		o.set( K( "jointEvents" ), p.jointEvents );
+		o.set( K( "hitEvents" ), p.hitEvents );
+		o.set( K( "refit" ), p.refit );
+		o.set( K( "bullets" ), p.bullets );
+		o.set( K( "sleepIslands" ), p.sleepIslands );
+		o.set( K( "sensors" ), p.sensors );
 		return o;
 	}
 };
+
+// ---------------------------------------------------------------------------
+// Step timers
+// ---------------------------------------------------------------------------
+
+// Box3D reads the clock around every stage of a step and every time-of-impact sweep, for its profile and a stall log.
+// In WebAssembly each read crosses into JavaScript: 1 241 reads a step on 360 bodies, 5 % to 15 % of the step. The
+// single-threaded flavours link with --wrap=clock_gettime (scripts/build.sh), so the clock reads zero until asked for.
+// Without the timers World.getProfile is all zeros and the stall log stays silent; results do not depend on them.
+#ifdef __EMSCRIPTEN_PTHREADS__
+static void enableStepTimers( bool ) {}
+#else
+static bool s_stepTimers = false;
+
+extern "C" int __real_clock_gettime( clockid_t id, struct timespec* ts );
+extern "C" int __wrap_clock_gettime( clockid_t id, struct timespec* ts )
+{
+	if ( s_stepTimers )
+	{
+		return __real_clock_gettime( id, ts );
+	}
+	ts->tv_sec = 0;
+	ts->tv_nsec = 0;
+	return 0;
+}
+
+static void enableStepTimers( bool on )
+{
+	s_stepTimers = on;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Bindings
@@ -2794,6 +2844,8 @@ struct World
 EMSCRIPTEN_BINDINGS( box3d )
 {
 	using namespace emscripten;
+
+	function( "enableStepTimers", &enableStepTimers );
 
 #ifdef __EMSCRIPTEN_PTHREADS__
 	constant( "threaded", true );
