@@ -12,6 +12,11 @@ REPO="$(node -p "require(process.argv[1]).box3d.repo" "$DIR/versions.json")"
 DEST="$ROOT/deps/box3d"
 
 if [ -d "$DEST/.git" ] && [ "$(git -C "$DEST" rev-parse HEAD 2>/dev/null)" = "$SHA" ]; then
+  # The same SHA with changed files would build something other than the pin.
+  if [ -n "$(git -C "$DEST" status --porcelain)" ]; then
+    echo "deps/box3d has local changes; the build must use the pin as it is. Remove deps/box3d to fetch it again." >&2
+    exit 1
+  fi
   echo "box3d already at $SHA"
 else
   rm -rf "$DEST"
