@@ -392,3 +392,27 @@ test('queryBatch kinds 4 and 5 give every hit: a mask, the shape a ray starts in
   assert.equal(u[39], 1);
   world.destroy();
 });
+
+test('readContacts: a begin with its normal and point, a hit with its speed, a sensor entered and left', () => {
+  const world = new b3.World({ gravity: { x: 0, y: -10, z: 0 } });
+  world.createBody({ type: 'static', position: { x: 0, y: -0.5, z: 0 } }).createBox({ halfExtents: { x: 10, y: 0.5, z: 10 }, enableHitEvents: true });
+  const zone = world.createBody({ type: 'static', position: { x: 3, y: 1, z: 0 } });
+  zone.createBox({ halfExtents: { x: 1, y: 1, z: 1 }, isSensor: true, enableSensorEvents: true });
+  const ball = world.createBody({ type: 'dynamic', position: { x: 3, y: 4, z: 0 } });
+  ball.createSphere({ radius: 0.5, enableContactEvents: true, enableHitEvents: true, enableSensorEvents: true, restitution: 0 });
+  const seen = [];
+  for (let t = 0; t < 120; t++) {
+    world.step(DT, SUBSTEPS);
+    const n = world.readContacts(), { u, f } = out(12 * n);
+    for (let i = 0; i < n; i++) seen.push({ kind: u[12 * i], ny: f[12 * i + 6], x: f[12 * i + 8], y: f[12 * i + 9], speed: f[12 * i + 11] });
+  }
+  const of = kind => seen.filter(e => e.kind === kind);
+  assert.equal(of(4).length, 1);
+  assert.equal(of(5).length, 0);
+  assert.equal(of(1).length, 1);
+  assert.ok(Math.abs(Math.abs(of(1)[0].ny) - 1) < 1e-3);
+  assert.ok(Math.abs(of(1)[0].x - 3) < 0.05 && Math.abs(of(1)[0].y) < 0.05, JSON.stringify(of(1)[0]));
+  assert.equal(of(3).length, 1);
+  assert.ok(of(3)[0].speed > 5, JSON.stringify(of(3)[0]));
+  world.destroy();
+});

@@ -2554,6 +2554,76 @@ struct World
 		return n;
 	}
 
+	// The same events with what a game asks of them, 12 words each at flatOut: kind (1 contact begin, 2 contact end, 3
+	// hit, 4 sensor begin, 5 sensor end), the index and generation of body A and of body B (a sensor event: the sensor,
+	// then the visitor), the normal from A to B, the point, the speed of a hit, floats. A begin's point is the middle of
+	// its first manifold. Returns the events.
+	int readContacts() const
+	{
+		g_flatOut.clear();
+		int n = 0;
+		auto put = [&]( uint32_t kind, b3ShapeId a, b3ShapeId b, b3Vec3 normal, b3Vec3 point, float speed ) {
+			putU( kind );
+			putShapeBody( a );
+			putShapeBody( b );
+			putF( normal.x );
+			putF( normal.y );
+			putF( normal.z );
+			putF( point.x );
+			putF( point.y );
+			putF( point.z );
+			putF( speed );
+			++n;
+		};
+		b3ContactEvents contacts = b3World_GetContactEvents( id );
+		for ( int i = 0; i < contacts.beginCount; ++i )
+		{
+			const b3ContactBeginTouchEvent& e = contacts.beginEvents[i];
+			b3Vec3 normal = b3Vec3_zero, point = b3Vec3_zero;
+			if ( b3Contact_IsValid( e.contactId ) )
+			{
+				b3ContactData data = b3Contact_GetData( e.contactId );
+				if ( data.manifoldCount > 0 )
+				{
+					const b3Manifold& m = data.manifolds[0];
+					normal = m.normal;
+					b3Vec3 sum = b3Vec3_zero;
+					for ( int k = 0; k < m.pointCount; ++k )
+					{
+						sum = b3Add( sum, m.points[k].anchorA );
+					}
+					if ( m.pointCount > 0 )
+					{
+						b3Pos origin = b3Body_GetWorldCenter( b3Shape_GetBody( e.shapeIdA ) );
+						float share = 1.0f / (float)m.pointCount;
+						point = { (float)origin.x + share * sum.x, (float)origin.y + share * sum.y,
+								  (float)origin.z + share * sum.z };
+					}
+				}
+			}
+			put( 1, e.shapeIdA, e.shapeIdB, normal, point, 0.0f );
+		}
+		for ( int i = 0; i < contacts.endCount; ++i )
+		{
+			put( 2, contacts.endEvents[i].shapeIdA, contacts.endEvents[i].shapeIdB, b3Vec3_zero, b3Vec3_zero, 0.0f );
+		}
+		for ( int i = 0; i < contacts.hitCount; ++i )
+		{
+			const b3ContactHitEvent& e = contacts.hitEvents[i];
+			put( 3, e.shapeIdA, e.shapeIdB, e.normal, { (float)e.point.x, (float)e.point.y, (float)e.point.z }, e.approachSpeed );
+		}
+		b3SensorEvents sensors = b3World_GetSensorEvents( id );
+		for ( int i = 0; i < sensors.beginCount; ++i )
+		{
+			put( 4, sensors.beginEvents[i].sensorShapeId, sensors.beginEvents[i].visitorShapeId, b3Vec3_zero, b3Vec3_zero, 0.0f );
+		}
+		for ( int i = 0; i < sensors.endCount; ++i )
+		{
+			put( 5, sensors.endEvents[i].sensorShapeId, sensors.endEvents[i].visitorShapeId, b3Vec3_zero, b3Vec3_zero, 0.0f );
+		}
+		return n;
+	}
+
 	// `count` body writes in one call, 12 words each at flatIn: op, the body's index and generation, then up to 9
 	// floats. Ops: 0 linear velocity (x y z), 1 angular velocity (x y z), 2 transform (position, rotation x y z w;
 	// b3Body_SetTransform), 3 target transform (position, rotation, time step; wakes the body), 4 linear impulse at
@@ -3020,6 +3090,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "queryBatch", &World::queryBatch )
 		.function( "readMoved", &World::readMoved )
 		.function( "readEvents", &World::readEvents )
+		.function( "readContacts", &World::readContacts )
 		.function( "writeBodies", &World::writeBodies )
 		.function( "moverBatch", &World::moverBatch )
 		.function( "castMover", &World::castMover )
