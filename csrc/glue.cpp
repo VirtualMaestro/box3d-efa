@@ -1493,12 +1493,12 @@ struct Body
 
 	val getLocalCenterOfMass() const
 	{
-		return fromVec3( b3Body_GetLocalCenterOfMass( id ) );
+		return fromVec3( b3Body_GetLocalCenter( id ) );
 	}
 
 	val getWorldCenterOfMass() const
 	{
-		return fromVec3( b3Body_GetWorldCenterOfMass( id ) );
+		return fromVec3( b3Body_GetWorldCenter( id ) );
 	}
 
 	val getLocalPoint( val worldPoint ) const
@@ -1860,7 +1860,7 @@ struct World
 	{
 		if ( player != nullptr )
 		{
-			b3RecPlayer_Destroy( player );
+			b3DestroyPlayer( player );
 			player = nullptr;
 		}
 		else if ( b3World_IsValid( id ) )
@@ -1889,7 +1889,7 @@ struct World
 	bool restore( val bytes )
 	{
 		std::vector<uint8_t> data = emscripten::convertJSArrayToNumberVector<uint8_t>( bytes );
-		b3RecPlayer* restored = b3RecPlayer_Create( data.data(), (int)data.size(), 1 );
+		b3RecPlayer* restored = b3CreatePlayer( data.data(), (int)data.size(), 1 );
 		if ( restored == nullptr )
 		{
 			return false;
@@ -2795,7 +2795,7 @@ struct World
 		o.set( K( "solveImpulses" ), p.solveImpulses );
 		o.set( K( "integratePositions" ), p.integratePositions );
 		o.set( K( "relaxImpulses" ), p.relaxImpulses );
-		o.set( K( "applyRestitution" ), p.applyRestitution );
+		o.set( K( "applyRestitution" ), p.restitution );
 		o.set( K( "storeImpulses" ), p.storeImpulses );
 		o.set( K( "splitIslands" ), p.splitIslands );
 		o.set( K( "transforms" ), p.transforms );

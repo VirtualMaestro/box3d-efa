@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { clearTimeout, setTimeout } from 'node:timers';
 import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
 
-// The object calls against a reference build, the files of a previous release: the same seeded scenarios on both modules, every
+// The object calls against a reference build, the files of a previous release on the same Box3D SHA: the same seeded scenarios on both modules, every
 // value the calls return compared. Set B3_REFERENCE to a folder with the reference (its box3d.scalar.mjs and .wasm);
 // without it the test is skipped. Build one from a worktree, for example of 8f045f2 (the glue before the faster
 // conversions): `git worktree add ../box3d-wasm-reference 8f045f2`, then `npm run fetch-deps` and

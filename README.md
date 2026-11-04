@@ -30,11 +30,9 @@ tens. The API is unchanged; on Node the object calls take 0.12x to 0.67x of thei
 
 A second `destroy()` of a body, shape, joint or world does nothing, and any other method on a handle whose object
 or world was destroyed throws (before, a stale id read or wrote whatever held its slot). `test/reference.test.mjs` runs seeded scenarios of object calls on this build and on a reference build of
-the files of a previous release and compares every result: `B3_REFERENCE=<folder with the release's files> npm test` (skipped without it).
+the files of a previous release on the same Box3D SHA (another Box3D gives other floats) and compares every result: `B3_REFERENCE=<folder with the release's files> npm test` (skipped without it).
 
-World queries leave sensor shapes out unless the filter has `includeSensors: true`. `npm run fetch-deps` applies
-`scripts/box3d-simd.patch` to the pinned Box3D, so the `scalar` flavour carries no SIMD.
-
+World queries leave sensor shapes out unless the filter has `includeSensors: true`. 
 The single-threaded flavours (`standard`, `scalar`) are `-Os` with LTO and read no clock inside a step: under Emscripten
 each read crosses into JavaScript, and Box3D's timing would otherwise cost much of a step on a phone. So `World.getProfile`
 is all zeros until `enableStepTimers(true)` is called, and Box3D's stall log is silent. `deluxe` keeps its timers and `-O3`.
@@ -218,7 +216,7 @@ npm test
 ### Updating Box3D
 
 Box3D is under active development and is not forked here. To move to a newer version: set its SHA in
-`scripts/versions.json`, run `npm run fetch-deps` (drop `scripts/box3d-simd.patch` if Box3D no longer needs it), build, and
+`scripts/versions.json`, run `npm run fetch-deps`, build, and
 fix the glue where its API changed. A new version can change simulation results: EFA's cross-host hashes and timing rows
 are rerun before its adapter takes the new build.
 
