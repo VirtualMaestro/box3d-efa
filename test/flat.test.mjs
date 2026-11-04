@@ -348,3 +348,33 @@ test('a ray that starts inside a shape passes it and hits what is behind; a shap
   assert.equal(cast.fraction, 0);
   world.destroy();
 });
+
+test('queryBatch kinds 4 and 5 give every hit: a mask, the shape a ray starts in, a sensor, and the word count', () => {
+  const world = new b3.World({ gravity: { x: 0, y: 0, z: 0 } });
+  const at = (x, opts = {}) => {
+    const body = world.createBody({ type: 'static', position: { x, y: 0, z: 0 } });
+    body.createSphere({ radius: 1, ...opts });
+    return body;
+  };
+  at(0);
+  at(5);
+  at(8, { filter: { categoryBits: 2, maskBits: 2 } });
+  at(11, { isSensor: true, enableSensorEvents: true });
+  world.step(DT, SUBSTEPS);
+  const q = (kind, mask, shape = 0) => [U(kind), U(MASK | shape), shape ? 0.25 : 0, 0, 0, 0, 0, 20, 0, 0, 0, U(mask)];
+  writeIn([q(4, 0xffffffff), q(4, 1), q(5, 0xffffffff, 1), q(0, 1)]);
+  const words = world.queryBatch(4);
+  assert.equal(words, (1 + 2 * 6) + (1 + 6) + (1 + 3 * 6) + 7);
+  const { u, f } = out(words);
+  const hits = (from) => Array.from({ length: u[from] }, (_, k) => f[from + 1 + 6 * k] * 20).sort((a, b) => a - b);
+  const near = (from, want) => {
+    const got = hits(from);
+    assert.equal(got.length, want.length);
+    got.forEach((d, k) => assert.ok(Math.abs(d - want[k]) < 0.02, `${d} and ${want[k]}`)); // A cast stops about 1 cm short.
+  };
+  near(0, [4, 7]);
+  near(13, [4]);
+  near(20, [0, 3.75, 6.75]);
+  assert.equal(u[39], 1);
+  world.destroy();
+});

@@ -299,13 +299,40 @@ static float closestCastFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, floa
 
 // A ray that starts inside a shape: Box3D reports the shape at fraction 0 with no normal, which would hide all behind it.
 // Box2D's ray passes it, and so does this one: a shooter does not hit itself. A shape cast keeps the hit at 0.
-static float closestRayFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, float fraction, uint64_t a, int b, int c, void* context )
+static float closestRayFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, float fraction, uint64_t a, int b, int c,
+							void* context )
 {
 	if ( fraction == 0.0f )
 	{
 		return -1.0f;
 	}
 	return closestCastFcn( shapeId, point, normal, fraction, a, b, c, context );
+}
+
+// Every hit of a ray or a shape cast, in the tree's order. A hit of the shape a ray starts in is left out, as in closestRayFcn.
+struct AllCastHit
+{
+	float fraction;
+	b3Vec3 normal;
+	b3ShapeId shapeId;
+};
+
+struct AllCastContext
+{
+	bool includeSensors;
+	bool ray;
+	std::vector<AllCastHit> hits;
+};
+
+static float allCastFcn( b3ShapeId shapeId, b3Pos, b3Vec3 normal, float fraction, uint64_t, int, int, void* context )
+{
+	AllCastContext* c = (AllCastContext*)context;
+	if ( ( c->ray && fraction == 0.0f ) || ( !c->includeSensors && b3Shape_IsSensor( shapeId ) ) )
+	{
+		return -1.0f;
+	}
+	c->hits.push_back( { fraction, normal, shapeId } );
+	return 1.0f;
 }
 
 static val closestCastResult( const ClosestCastContext& c )
@@ -2267,16 +2294,17 @@ struct World
 	}
 
 	// `count` queries in one call, without JS objects (see "Flat calls"). A query is 12 words at flatIn:
-	//   0 kind: 0 ray, 1 shape cast, 2 overlap, 3 closest point
+	//   0 kind: 0 ray, 1 shape cast, 2 overlap, 3 closest point, 4 ray with every hit, 5 shape cast with every hit
 	//   1 flags: bits 0-1 the shape (0 none, 1 sphere: one point, 2 capsule: two points along y), bit 2 include
 	//     sensors, bit 3 word 11 holds the mask bits (else the default filter)
 	//   2 radius, 3 the capsule's half height (floats)
-	//   4-6 the origin (ray, cast, overlap) or the target (closest point), 7-9 the translation (ray, cast), floats
+	//   4-6 the origin (ray, cast, overlap) or the target (closest point), 7-9 the translation (rays, casts), floats
 	//   10 the maximum distance (closest point), float; 11 the mask bits, the low 32 (unsigned)
 	// The results follow each other at flatOut:
 	//   ray, cast: 7 words: hit (0 or 1), fraction, normal (3 floats), the body's index and generation
 	//   closest point: 7 words: hit, distance, point (3 floats), the body's index and generation
 	//   overlap: 1 + 2n words: n, then the index and generation of each shape's body (one entry per shape)
+	//   every hit: 1 + 6n words: n, then fraction, normal (3 floats), the body's index and generation, in no set order
 	// Returns the words written; a query of an unknown kind ends the batch there.
 	int queryBatch( int count ) const
 	{
@@ -2334,6 +2362,27 @@ struct World
 				for ( b3ShapeId s : c.shapes )
 				{
 					putBody( b3Shape_GetBody( s ) );
+				}
+			}
+			else if ( kind == 4 || kind == 5 )
+			{
+				AllCastContext c = { includeSensors, kind == 4, {} };
+				if ( kind == 4 )
+				{
+					b3World_CastRay( id, from, along, filter, allCastFcn, &c );
+				}
+				else
+				{
+					b3World_CastShape( id, from, &proxy, along, filter, allCastFcn, &c );
+				}
+				putU( (uint32_t)c.hits.size() );
+				for ( const AllCastHit& h : c.hits )
+				{
+					putF( h.fraction );
+					putF( h.normal.x );
+					putF( h.normal.y );
+					putF( h.normal.z );
+					putShapeBody( h.shapeId );
 				}
 			}
 			else if ( kind == 3 )
