@@ -1975,6 +1975,7 @@ struct World
 			def.angularDamping = getFloat( opts, "angularDamping", def.angularDamping );
 			def.gravityScale = getFloat( opts, "gravityScale", def.gravityScale );
 			def.sleepThreshold = getFloat( opts, "sleepThreshold", def.sleepThreshold );
+			def.safetyFactor = getFloat( opts, "safetyFactor", def.safetyFactor );
 			def.enableSleep = getBool( opts, "enableSleep", def.enableSleep );
 			def.isAwake = getBool( opts, "isAwake", def.isAwake );
 			def.isBullet = getBool( opts, "isBullet", def.isBullet );
