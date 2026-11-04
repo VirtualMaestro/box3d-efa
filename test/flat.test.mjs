@@ -318,3 +318,33 @@ test('flat buffers: never at address 0; a mover record asking for 2^32 - 1 round
   assert.ok(performance.now() - t0 < 1000);
   world.destroy();
 });
+
+test('queryBatch with a mask: a shape is seen by its category, whatever its own mask holds', () => {
+  const world = new b3.World({ gravity: { x: 0, y: 0, z: 0 } });
+  const body = world.createBody({ type: 'static', position: { x: 5, y: 0, z: 0 } });
+  body.createSphere({ radius: 1, filter: { categoryBits: 4, maskBits: 4 } });
+  world.step(DT, SUBSTEPS);
+  const ray = (mask) => [U(0), U(MASK), 0, 0, 0, 0, 0, 10, 0, 0, 0, U(mask)];
+  writeIn([ray(4), ray(8)]);
+  const { u } = out(world.queryBatch(2));
+  assert.equal(u[0], 1);
+  assert.equal(u[7], 0);
+  world.destroy();
+});
+
+test('a ray that starts inside a shape passes it and hits what is behind; a shape cast stays at distance 0', () => {
+  const world = new b3.World({ gravity: { x: 0, y: 0, z: 0 } });
+  world.createBody({ type: 'static', position: { x: 0, y: 0, z: 0 } }).createSphere({ radius: 1 });
+  world.createBody({ type: 'static', position: { x: 5, y: 0, z: 0 } }).createSphere({ radius: 1 });
+  world.step(DT, SUBSTEPS);
+  const along = { x: 10, y: 0, z: 0 };
+  assert.ok(Math.abs(world.castRay({ x: 0, y: 0, z: 0 }, along, {}).fraction * 10 - 4) < 1e-3);
+  writeIn([[U(0), U(0), 0, 0, 0, 0, 0, 10, 0, 0, 0, U(0)]]);
+  const { u, f } = out(world.queryBatch(1));
+  assert.equal(u[0], 1);
+  assert.ok(Math.abs(f[1] * 10 - 4) < 1e-3);
+  const cast = world.castShape({ x: 0, y: 0, z: 0 }, { points: [{ x: 0, y: 0, z: 0 }], radius: 0.25 }, along, {});
+  assert.equal(cast.hit, true);
+  assert.equal(cast.fraction, 0);
+  world.destroy();
+});

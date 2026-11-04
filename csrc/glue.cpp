@@ -297,6 +297,17 @@ static float closestCastFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, floa
 	return fraction;
 }
 
+// A ray that starts inside a shape: Box3D reports the shape at fraction 0 with no normal, which would hide all behind it.
+// Box2D's ray passes it, and so does this one: a shooter does not hit itself. A shape cast keeps the hit at 0.
+static float closestRayFcn( b3ShapeId shapeId, b3Pos point, b3Vec3 normal, float fraction, uint64_t a, int b, int c, void* context )
+{
+	if ( fraction == 0.0f )
+	{
+		return -1.0f;
+	}
+	return closestCastFcn( shapeId, point, normal, fraction, a, b, c, context );
+}
+
 static val closestCastResult( const ClosestCastContext& c )
 {
 	val o = val::object();
@@ -2203,7 +2214,7 @@ struct World
 	{
 		ClosestCastContext c = { includeSensorsOf( filterOpts ), false, b3_nullShapeId, b3Vec3_zero, b3Vec3_zero, 1.0f };
 		b3World_CastRay( id, toVec3( origin, b3Vec3_zero ), toVec3( translation, b3Vec3_zero ), queryFilterFromOpts( filterOpts ),
-						 closestCastFcn, &c );
+						 closestRayFcn, &c );
 		return closestCastResult( c );
 	}
 
@@ -2284,6 +2295,8 @@ struct World
 			if ( flags & 8 )
 			{
 				filter.maskBits = q[11].u;
+				// Every category: a shape is seen by its own category and the mask, whatever the shape's own mask holds.
+				filter.categoryBits = UINT64_MAX;
 			}
 			b3Vec3 from = { q[4].f, q[5].f, q[6].f };
 			b3Vec3 along = { q[7].f, q[8].f, q[9].f };
@@ -2300,7 +2313,7 @@ struct World
 				ClosestCastContext c = { includeSensors, false, b3_nullShapeId, b3Vec3_zero, b3Vec3_zero, 1.0f };
 				if ( kind == 0 )
 				{
-					b3World_CastRay( id, from, along, filter, closestCastFcn, &c );
+					b3World_CastRay( id, from, along, filter, closestRayFcn, &c );
 				}
 				else
 				{
