@@ -6,7 +6,7 @@ diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
  elseif (EMSCRIPTEN)
  	message(STATUS "Box3D on Emscripten")
 -	target_compile_options(box3d PRIVATE -msimd128 -msse2)
-+	# No wasm SIMD when BOX3D_DISABLE_SIMD (the scalar and legacy flavours), as upstream Box3D HEAD does.
++	# No wasm SIMD when BOX3D_DISABLE_SIMD (the scalar flavour), as upstream Box3D HEAD does.
 +	if (NOT BOX3D_DISABLE_SIMD)
 +		target_compile_options(box3d PRIVATE -msimd128 -msse2)
 +	endif()

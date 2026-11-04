@@ -5,17 +5,14 @@
 # Flavours (standard and deluxe use wasm SIMD, which is baseline everywhere in 2026):
 #   standard  single threaded
 #   deluxe    wasm threads (SharedArrayBuffer, pthreads)
-#   scalar    single threaded, no wasm SIMD (Box3D's scalar math); opt-in
-#   legacy    scalar, WebAssembly MVP only and no BigInt, loads on Safari 12;
-#             opt-in, needs an emsdk that still targets Safari 12 (3.1.74)
+#   scalar    single threaded, no wasm SIMD (Box3D's scalar math)
 #
 # The auto-detecting entry (src/entry.mjs) is copied to dist/ and picks
 # deluxe when threads are usable, standard otherwise.
 #
 # Usage:
-#   scripts/build.sh                 build both flavours, Release
+#   scripts/build.sh                 build every flavour, Release
 #   FLAVOURS=standard scripts/build.sh
-#   FLAVOURS="scalar legacy" scripts/build.sh
 #   TARGET_TYPE=Debug scripts/build.sh
 set -euo pipefail
 
@@ -23,7 +20,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && { pwd -W 2>/dev/null || pwd; })"
 ROOT="$(dirname "$DIR")"
 
-FLAVOURS="${FLAVOURS:-standard deluxe}"
+FLAVOURS="${FLAVOURS:-standard scalar deluxe}"
 TARGET_TYPE="${TARGET_TYPE:-Release}"
 BOX3D_SRC="$ROOT/deps/box3d"
 
@@ -50,19 +47,12 @@ for FLAVOUR in $FLAVOURS; do
       DISABLE_SIMD=ON
       BASENAME="box3d.scalar"
       ;;
-    legacy)
-      # Scalar, WebAssembly MVP only (no sign extension, bulk memory or reference types) and no BigInt:
-      # Safari 12 (iOS 12) parses nothing newer.
-      DISABLE_SIMD=ON
-      FLAVOUR_FLAGS=(-mcpu=mvp)
-      BASENAME="box3d.legacy"
-      ;;
     deluxe)
       FLAVOUR_FLAGS=(-pthread)
       BASENAME="box3d.deluxe"
       ;;
     *)
-      echo "Unknown flavour: $FLAVOUR (expected standard, deluxe, scalar or legacy)" >&2
+      echo "Unknown flavour: $FLAVOUR (expected standard, scalar or deluxe)" >&2
       exit 1
       ;;
   esac
@@ -114,9 +104,6 @@ for FLAVOUR in $FLAVOURS; do
   )
   if [ "$DISABLE_SIMD" = OFF ]; then
     EMCC_OPTS+=(-msimd128 -msse2)
-  fi
-  if [ "$FLAVOUR" = "legacy" ]; then
-    EMCC_OPTS+=(-sMIN_SAFARI_VERSION=120000 -sWASM_BIGINT=0)
   fi
 
   if [ "$FLAVOUR" = "deluxe" ]; then

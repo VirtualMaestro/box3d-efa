@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch upstream Box3D source at the SHA pinned in scripts/versions.json,
 # then apply scripts/box3d-simd.patch (wasm SIMD flags only when
-# BOX3D_DISABLE_SIMD is off, which the scalar and legacy flavours need).
+# BOX3D_DISABLE_SIMD is off, which the scalar flavour needs).
 # Idempotent: skips the fetch when deps/box3d is already at the pin, and the
 # patch when it is already applied.
 set -euo pipefail

@@ -1,12 +1,13 @@
 {
-  "name": "box3d-wasm",
-  "version": "0.2.0",
-  "description": "Box3D, Erin Catto's 3D physics engine, compiled to WebAssembly with SIMD and optional wasm threads. Isomorphic: works in browsers and Node.js, auto-detecting thread support.",
+  "name": "box3d-efa",
+  "version": "0.3.0",
+  "description": "Box3D, Erin Catto's 3D physics engine, compiled to WebAssembly for the EFA project. Built for EFA's needs: no promise of general use or a stable API.",
   "type": "module",
   "main": "dist/entry.mjs",
   "exports": {
     ".": "./dist/entry.mjs",
     "./standard": "./dist/box3d.mjs",
+    "./scalar": "./dist/box3d.scalar.mjs",
     "./deluxe": "./dist/box3d.deluxe.mjs",
     "./package.json": "./package.json",
     "./iso": "./dist/iso.mjs"
@@ -42,16 +43,19 @@
     "game",
     "simulation"
   ],
-  "author": "Luis Montes",
+  "author": "VirtualMaestro",
+  "contributors": [
+    "Luis Montes"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/monteslu/box3d-wasm.git"
+    "url": "git+https://github.com/VirtualMaestro/box3d-efa.git"
   },
   "bugs": {
-    "url": "https://github.com/monteslu/box3d-wasm/issues"
+    "url": "https://github.com/VirtualMaestro/box3d-efa/issues"
   },
-  "homepage": "https://github.com/monteslu/box3d-wasm#readme",
+  "homepage": "https://github.com/VirtualMaestro/box3d-efa#readme",
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "clang-format": "^1.8.0",

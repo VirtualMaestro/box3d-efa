@@ -32,8 +32,7 @@ using emscripten::val;
 // Every call into JS costs a crossing, and val reads or writes a property by a C string key by decoding the string
 // first (a crossing of its own) and freeing the handle after (another). Reading { x, y, z } the plain way took
 // about 18 crossings. These helpers read a field, a vector or a quaternion in one crossing and build result objects
-// in one; other property access goes through K, which makes each key's JS string once. The JS below is ES5: the
-// legacy flavour loads on Safari 12.
+// in one; other property access goes through K, which makes each key's JS string once.
 
 // Property keys as JS strings, made once and kept (string literals: one entry per literal).
 static const val& K( const char* name )

@@ -1,10 +1,13 @@
-# box3d-wasm
+# box3d-efa
 
-## This fork
+[Box3D](https://github.com/erincatto/box3d) compiled to WebAssembly for the EFA project, the binding its physics adapter
+uses. **It is built for EFA's needs:** it is public, but it does not promise general use, a stable API or support, and it
+changes when EFA needs it to. It started from [monteslu/box3d-wasm](https://github.com/monteslu/box3d-wasm) (MIT, see
+`LICENSE`). Box3D itself is taken from its own repository at a pinned SHA, and its C code is not changed.
 
-This is a fork of [monteslu/box3d-wasm](https://github.com/monteslu/box3d-wasm). Its default branch `main` is the
-Box3D binding used by the physics adapter of the EFA project. It adds to the embind
-glue (`csrc/glue.cpp`; Box3D's C code is not changed):
+## What it adds
+
+The binding adds to the upstream embind glue (`csrc/glue.cpp`):
 
 | JS | C |
 |---|---|
@@ -29,17 +32,12 @@ A second `destroy()` of a body, shape, joint or world does nothing, and any othe
 or world was destroyed throws (before, a stale id read or wrote whatever held its slot). `test/reference.test.mjs` runs seeded scenarios of object calls on this build and on a reference build of
 an earlier glue and compares every result: `B3_REFERENCE=<reference dist/> npm test` (skipped without it).
 
-World queries leave sensor shapes out unless the filter has `includeSensors: true`. `scripts/build.sh` also has the
-opt-in flavours `scalar` (no wasm SIMD) and `legacy` (scalar, WebAssembly MVP, no BigInt; needs emsdk 3.1.74):
-`FLAVOURS="standard scalar" npm run build`. `npm run fetch-deps` applies `scripts/box3d-simd.patch` to the pinned
-Box3D, so the scalar flavours carry no SIMD; the Box3D pin is unchanged.
+World queries leave sensor shapes out unless the filter has `includeSensors: true`. `npm run fetch-deps` applies
+`scripts/box3d-simd.patch` to the pinned Box3D, so the `scalar` flavour carries no SIMD.
 
-Each of the first eight features also sits on its own `pr/*` branch against upstream `main` (`2f2f97ae`), built
-and tested alone. Upstream is `monteslu/box3d-wasm` `main`.
-
-[![npm version](https://img.shields.io/npm/v/box3d-wasm.svg)](https://www.npmjs.com/package/box3d-wasm)
-[![CI](https://github.com/monteslu/box3d-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/monteslu/box3d-wasm/actions/workflows/ci.yml)
-[![license](https://img.shields.io/npm/l/box3d-wasm.svg)](LICENSE)
+The single-threaded flavours (`standard`, `scalar`) are `-Os` with LTO and read no clock inside a step: under Emscripten
+each read crosses into JavaScript, and Box3D's timing would otherwise cost much of a step on a phone. So `World.getProfile`
+is all zeros until `enableStepTimers(true)` is called, and Box3D's stall log is silent. `deluxe` keeps its timers and `-O3`.
 
 [Box3D](https://github.com/erincatto/box3d) compiled to WebAssembly, with SIMD and optional wasm threads. Works in browsers and Node.js from a single package.
 
@@ -49,14 +47,13 @@ Box3D is a 3D rigid body physics engine written by Erin Catto, the author of Box
 
 ## Install
 
-```bash
-npm i box3d-wasm
-```
+Not on npm. Each `v*` tag is a [GitHub release](https://github.com/VirtualMaestro/box3d-efa/releases) with the built files and
+their `SHA256SUMS.txt`, made by CI.
 
 ## Quick start
 
 ```js
-import Box3D from 'box3d-wasm';
+import Box3D from 'box3d-efa';
 
 const b3 = await Box3D();
 
@@ -81,13 +78,13 @@ The same code runs in Node.js and in the browser. The default import auto-detect
 
 | import | threads | picked by the default import when |
 | --- | --- | --- |
-| `box3d-wasm/deluxe` | yes | SharedArrayBuffer is usable (Node.js, or a cross-origin isolated page) |
-| `box3d-wasm/standard` | no | everything else |
+| `box3d-efa/deluxe` | yes | SharedArrayBuffer is usable (Node.js, or a cross-origin isolated page) |
+| `box3d-efa/standard` | no | everything else |
 
-`box3d-wasm` (the default import) runs the detection above and returns whichever module fits. Import a specific flavour directly when you want to skip detection:
+`box3d-efa` (the default import) runs the detection above and returns whichever module fits. Import a specific flavour directly when you want to skip detection:
 
 ```js
-import Box3D from 'box3d-wasm/deluxe';
+import Box3D from 'box3d-efa/deluxe';
 
 const b3 = await Box3D();
 const world = new b3.World({ gravity: { x: 0, y: -10, z: 0 }, workerCount: 4 });
@@ -183,14 +180,14 @@ Every body and shape gets an auto-assigned numeric `userData` tag (you can overw
 
 Wrapper objects returned by embind (`World`, `Body`, `Shape`, joints) are tiny handles. Call `.delete()` when you no longer need the JS handle, and `.destroy()` to remove the underlying object from the simulation. Destroying a world frees every body, shape, and joint inside it.
 
-## The isomorphic surface (`box3d-wasm/iso`)
+## The isomorphic surface (`box3d-efa/iso`)
 
 For projects where the same game source also compiles to a NATIVE binary
 (e.g. [scriptc-game](https://github.com/monteslu/scriptc-game)), the
 `/iso` entry serves the same engine through a shared binding frontend:
 
 ```js
-import Box3D from 'box3d-wasm/iso';
+import Box3D from 'box3d-efa/iso';
 
 const b3 = await Box3D();
 const world = new b3.World({ gravity: { x: 0, y: -10, z: 0 } });
@@ -209,14 +206,21 @@ with the embind API above, which remains the default export.
 
 ## Building from source
 
-Requires [emsdk](https://emscripten.org/docs/getting_started/downloads.html) (tested with 4.0.18), CMake, and Node 22+.
+Requires [emsdk](https://emscripten.org/docs/getting_started/downloads.html) (6.0.13, the version CI pins), CMake, and Node 22+.
 
 ```bash
 npm ci
 npm run fetch-deps   # clones Box3D at the SHA pinned in scripts/versions.json
-npm run build        # builds standard and deluxe flavours into dist/
+npm run build        # builds the standard, scalar and deluxe flavours into dist/
 npm test
 ```
+
+### Updating Box3D
+
+Box3D is under active development and is not forked here. To move to a newer version: set its SHA in
+`scripts/versions.json`, run `npm run fetch-deps` (drop `scripts/box3d-simd.patch` if Box3D no longer needs it), build, and
+fix the glue where its API changed. A new version can change simulation results: EFA's cross-host hashes and timing rows
+are rerun before its adapter takes the new build.
 
 ## License
 

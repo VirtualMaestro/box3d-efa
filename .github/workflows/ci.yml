@@ -3,11 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -17,7 +20,7 @@ jobs:
 
       - uses: mymindstorm/setup-emsdk@v16
         with:
-          version: 4.0.18
+          version: 6.0.13
           actions-cache-folder: emsdk-cache
 
       - name: Install dependencies
@@ -26,7 +29,7 @@ jobs:
       - name: Fetch pinned Box3D source
         run: npm run fetch-deps
 
-      - name: Build wasm (standard and deluxe)
+      - name: Build wasm (standard, scalar, deluxe)
         run: npm run build
 
       - name: Lint JavaScript
@@ -38,8 +41,20 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Sizes and checksums
+        working-directory: dist
+        run: |
+          sha256sum box3d*.mjs box3d*.wasm | tee SHA256SUMS.txt
+          for f in box3d*.wasm box3d*.mjs; do echo "$f $(wc -c < "$f") bytes, gzip $(gzip -9 -c "$f" | wc -c)"; done
+
       - name: Upload dist
         uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes "Built by CI from $GITHUB_SHA with emsdk 6.0.13."
