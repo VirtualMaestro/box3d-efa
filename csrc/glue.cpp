@@ -2819,7 +2819,9 @@ struct World
 // single-threaded flavours link with --wrap=clock_gettime (scripts/build.sh), so the clock reads zero until asked for.
 // Without the timers World.getProfile is all zeros and the stall log stays silent; results do not depend on them.
 #ifdef __EMSCRIPTEN_PTHREADS__
-static void enableStepTimers( bool ) {}
+static void enableStepTimers( bool )
+{
+}
 #else
 static bool s_stepTimers = false;
 

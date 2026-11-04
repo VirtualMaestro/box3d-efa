@@ -14,10 +14,10 @@
 
 #include <box3d/box3d.h>
 #include <cstdint>
-
 #include <emscripten/emscripten.h>
 #define B3F EMSCRIPTEN_KEEPALIVE
-extern "C" {
+extern "C"
+{
 
 // ---- handle tables ---------------------------------------------------------
 
@@ -81,8 +81,7 @@ B3F double b3f_getf( int32_t i )
 
 // ---- world ------------------------------------------------------------------
 
-B3F uint32_t b3f_world_create( double gx, double gy, double gz, uint32_t enableSleep,
-							   uint32_t workerCount )
+B3F uint32_t b3f_world_create( double gx, double gy, double gz, uint32_t enableSleep, uint32_t workerCount )
 {
 	b3WorldDef def = b3DefaultWorldDef();
 	def.gravity.x = (float)gx;
@@ -123,8 +122,8 @@ B3F void b3f_world_destroy( uint32_t w )
 
 // ---- bodies -----------------------------------------------------------------
 
-B3F uint32_t b3f_body_create( uint32_t w, int32_t type, double px, double py, double pz,
-							  double qx, double qy, double qz, double qw )
+B3F uint32_t b3f_body_create( uint32_t w, int32_t type, double px, double py, double pz, double qx, double qy, double qz,
+							  double qw )
 {
 	b3BodyDef def = b3DefaultBodyDef();
 	def.type = type == 2 ? b3_dynamicBody : type == 1 ? b3_kinematicBody : b3_staticBody;
@@ -168,8 +167,7 @@ B3F void b3f_body_read( uint32_t b )
 
 // Move a body WITHOUT sweeping it there: restart/respawn teleports.
 // Full pose: a respawned stack needs its rotations squared up too.
-B3F void b3f_body_teleport( uint32_t b, double px, double py, double pz,
-							double qx, double qy, double qz, double qw )
+B3F void b3f_body_teleport( uint32_t b, double px, double py, double pz, double qx, double qy, double qz, double qw )
 {
 	b3BodyId id = b3f_bodies[b];
 	b3Pos p;
@@ -228,24 +226,21 @@ static b3ShapeDef b3f_shape_def( double density, double friction, double restitu
 	return def;
 }
 
-B3F uint32_t b3f_shape_box( uint32_t b, double hx, double hy, double hz,
-							double density, double friction, double restitution )
+B3F uint32_t b3f_shape_box( uint32_t b, double hx, double hy, double hz, double density, double friction, double restitution )
 {
 	b3ShapeDef def = b3f_shape_def( density, friction, restitution );
 	b3BoxHull hull = b3MakeBoxHull( (float)hx, (float)hy, (float)hz );
 	return b3f_shape_slot( b3CreateHullShape( b3f_bodies[b], &def, &hull.base ) );
 }
 
-B3F uint32_t b3f_shape_sphere( uint32_t b, double radius,
-							   double density, double friction, double restitution )
+B3F uint32_t b3f_shape_sphere( uint32_t b, double radius, double density, double friction, double restitution )
 {
 	b3ShapeDef def = b3f_shape_def( density, friction, restitution );
 	b3Sphere sphere = { { 0, 0, 0 }, (float)radius };
 	return b3f_shape_slot( b3CreateSphereShape( b3f_bodies[b], &def, &sphere ) );
 }
 
-B3F void b3f_world_explode( uint32_t w, double px, double py, double pz,
-							double radius, double falloff, double impulsePerArea )
+B3F void b3f_world_explode( uint32_t w, double px, double py, double pz, double radius, double falloff, double impulsePerArea )
 {
 	b3ExplosionDef def = b3DefaultExplosionDef();
 	def.position.x = px;
