@@ -2346,8 +2346,10 @@ struct World
 	// asleep (0 or 1). A body destroyed since the step is left out. Returns the bodies written.
 	int readMoved() const
 	{
-		g_flatOut.clear();
 		b3BodyEvents events = b3World_GetBodyEvents( id );
+		// Sized once and written through a pointer: at -Os a push_back per word is not inlined, on the hottest read path.
+		g_flatOut.resize( (size_t)events.moveCount * 16 );
+		FlatWord* out = g_flatOut.data();
 		int written = 0;
 		for ( int i = 0; i < events.moveCount; ++i )
 		{
@@ -2359,22 +2361,25 @@ struct World
 			}
 			++written;
 			b3Vec3 v = b3Body_GetLinearVelocity( e.bodyId ), w = b3Body_GetAngularVelocity( e.bodyId );
-			putBody( e.bodyId );
-			putF( (float)e.transform.p.x );
-			putF( (float)e.transform.p.y );
-			putF( (float)e.transform.p.z );
-			putF( e.transform.q.v.x );
-			putF( e.transform.q.v.y );
-			putF( e.transform.q.v.z );
-			putF( e.transform.q.s );
-			putF( v.x );
-			putF( v.y );
-			putF( v.z );
-			putF( w.x );
-			putF( w.y );
-			putF( w.z );
-			putU( e.fellAsleep ? 1 : 0 );
+			out[0].u = (uint32_t)e.bodyId.index1;
+			out[1].u = e.bodyId.generation;
+			out[2].f = (float)e.transform.p.x;
+			out[3].f = (float)e.transform.p.y;
+			out[4].f = (float)e.transform.p.z;
+			out[5].f = e.transform.q.v.x;
+			out[6].f = e.transform.q.v.y;
+			out[7].f = e.transform.q.v.z;
+			out[8].f = e.transform.q.s;
+			out[9].f = v.x;
+			out[10].f = v.y;
+			out[11].f = v.z;
+			out[12].f = w.x;
+			out[13].f = w.y;
+			out[14].f = w.z;
+			out[15].u = e.fellAsleep ? 1 : 0;
+			out += 16;
 		}
+		g_flatOut.resize( (size_t)written * 16 );
 		return written;
 	}
 
