@@ -8,7 +8,7 @@
 #   scalar    single threaded, no wasm SIMD (Box3D's scalar math)
 #
 # The auto-detecting entry (src/entry.mjs) is copied to dist/ and picks
-# deluxe when threads are usable, standard otherwise.
+# scalar on a host without SIMD, deluxe when threads are usable, standard otherwise.
 #
 # Usage:
 #   scripts/build.sh                 build every flavour, Release

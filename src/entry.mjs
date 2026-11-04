@@ -1,17 +1,16 @@
-// Auto-detecting entry point for box3d-wasm.
+// Picks the build a host can run:
 //
-// Wasm SIMD is baseline in every modern browser and Node.js, so both builds
-// use it. The only runtime question is threads: the deluxe build needs
-// SharedArrayBuffer, which browsers only expose on cross-origin isolated
-// pages. Node.js always has it.
-//
-//   deluxe   SIMD + threads
+//   scalar   no wasm SIMD on this host
+//   deluxe   SIMD + threads, where SharedArrayBuffer is usable (browsers: a cross-origin isolated page; Node.js always)
 //   standard SIMD, single threaded
 //
-// Import a flavour directly with box3d-wasm/deluxe or box3d-wasm/standard
-// to skip detection.
+// Import box3d-efa/scalar, box3d-efa/standard or box3d-efa/deluxe to skip the check.
+const SIMD = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+
+export const hasSimd = () => WebAssembly.validate(SIMD);
 
 export default async (options) => {
+  if (!hasSimd()) return (await import('./box3d.scalar.mjs')).default(options);
   const canThread =
     typeof SharedArrayBuffer !== 'undefined' &&
     (typeof globalThis.crossOriginIsolated === 'undefined' || globalThis.crossOriginIsolated);

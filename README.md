@@ -70,12 +70,13 @@ for (let i = 0; i < 120; i++) {
 console.log(body.getPosition()); // { x: ~0, y: ~0.5, z: ~0 }
 ```
 
-The same code runs in Node.js and in the browser. The default import auto-detects thread support and loads the best build. Both builds use wasm SIMD, which every modern browser and Node.js supports. The wasm file is loaded relative to the module, so bundlers that understand `new URL(..., import.meta.url)` (Vite, webpack 5, Rollup) pick it up automatically.
+The same code runs in Node.js and in the browser. The default import checks wasm SIMD and thread support and loads the build that fits. The wasm file is loaded relative to the module, so bundlers that understand `new URL(..., import.meta.url)` (Vite, webpack 5, Rollup) pick it up automatically.
 
 ## Flavours
 
 | import | threads | picked by the default import when |
 | --- | --- | --- |
+| `box3d-efa/scalar` | no | the host has no wasm SIMD |
 | `box3d-efa/deluxe` | yes | SharedArrayBuffer is usable (Node.js, or a cross-origin isolated page) |
 | `box3d-efa/standard` | no | everything else |
 
