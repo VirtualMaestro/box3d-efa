@@ -505,8 +505,9 @@ static void putShapeBody( b3ShapeId shape )
 	}
 	else
 	{
+		// A shape destroyed since: no body to name. UINT32_MAX and the shape's index, for a caller who kept whose it was.
 		putU( UINT32_MAX );
-		putU( UINT32_MAX );
+		putU( (uint32_t)shape.index1 );
 	}
 }
 
@@ -694,6 +695,12 @@ struct Shape
 {
 	b3ShapeId id;
 	uint16_t worldGen = worldGenOf( id.world0 );
+
+	// The shape's index, as an event names a shape destroyed since.
+	int getIndex() const
+	{
+		return id.index1;
+	}
 
 	void stamp()
 	{
@@ -1376,6 +1383,79 @@ struct FilterJoint : Joint
 {
 };
 
+// Geometry cooked apart from any shape: createMesh and createHeightField take the result as `cooked`.
+static b3MeshData* cookMeshData( const val& opts )
+{
+	val vs = opts[K( "vertices" )], is = opts[K( "indices" )];
+	int nv = vs[K( "length" )].as<int>() / 3, ni = is[K( "length" )].as<int>();
+	std::vector<b3Vec3> vertices( nv );
+	for ( int i = 0; i < nv; ++i )
+		vertices[i] = { vs[3 * i].as<float>(), vs[3 * i + 1].as<float>(), vs[3 * i + 2].as<float>() };
+	std::vector<int32_t> indices( ni );
+	for ( int i = 0; i < ni; ++i )
+		indices[i] = is[i].as<int32_t>();
+	std::vector<uint8_t> materials( ni / 3, 0 );
+	b3MeshDef md = {};
+	md.vertices = vertices.data();
+	md.indices = indices.data();
+	md.materialIndices = materials.data();
+	md.vertexCount = nv;
+	md.triangleCount = ni / 3;
+	md.useMedianSplit = true;
+	md.identifyEdges = true;
+	return b3CreateMesh( &md, nullptr, 0 );
+}
+
+static b3HeightFieldData* cookHeightFieldData( const val& opts )
+{
+	std::vector<float> heights = emscripten::convertJSArrayToNumberVector<float>( opts[K( "heights" )] );
+	b3HeightFieldDef hd = {};
+	hd.countX = getInt( opts, "countX", 0 );
+	hd.countZ = getInt( opts, "countZ", 0 );
+	if ( hd.countX < 2 || hd.countZ < 2 || (int)heights.size() != hd.countX * hd.countZ )
+	{
+		return nullptr;
+	}
+	float lo = heights[0], hi = heights[0];
+	for ( float h : heights )
+	{
+		lo = h < lo ? h : lo;
+		hi = h > hi ? h : hi;
+	}
+	std::vector<uint8_t> materials;
+	if ( hasKey( opts, "materialIndices" ) )
+	{
+		materials = emscripten::convertJSArrayToNumberVector<uint8_t>( opts[K( "materialIndices" )] );
+	}
+	hd.heights = heights.data();
+	hd.materialIndices = (int)materials.size() == ( hd.countX - 1 ) * ( hd.countZ - 1 ) ? materials.data() : nullptr;
+	hd.scale = getVec3( opts, "scale", { 1.0f, 1.0f, 1.0f } );
+	hd.globalMinimumHeight = getFloat( opts, "globalMinimumHeight", lo );
+	hd.globalMaximumHeight = getFloat( opts, "globalMaximumHeight", hi );
+	hd.clockwiseWinding = getBool( opts, "clockwiseWinding", false );
+	return b3CreateHeightField( &hd );
+}
+
+static int cookMesh( val opts )
+{
+	return (int)(uintptr_t)cookMeshData( opts );
+}
+
+static void freeMesh( int cooked )
+{
+	b3DestroyMesh( (b3MeshData*)(uintptr_t)cooked );
+}
+
+static int cookHeightField( val opts )
+{
+	return (int)(uintptr_t)cookHeightFieldData( opts );
+}
+
+static void freeHeightField( int cooked )
+{
+	b3DestroyHeightField( (b3HeightFieldData*)(uintptr_t)cooked );
+}
+
 struct Body
 {
 	b3BodyId id;
@@ -1765,28 +1845,12 @@ struct Body
 	}
 
 	// A triangle mesh from flat arrays (vertices: x y z per vertex; indices: three per triangle), for static terrain: Box3D
-	// meshes collide with static bodies only. Box3D keeps a pointer to the mesh data, so it is never freed.
+	// meshes collide with static bodies only. Box3D keeps a pointer to the mesh data: with `cooked`, the result of cookMesh,
+	// which many shapes can share and whose owner frees it; without, data cooked here, which is never freed.
 	Shape createMesh( val opts )
 	{
 		b3ShapeDef def = shapeDefFromOpts( opts );
-		val vs = opts[K( "vertices" )], is = opts[K( "indices" )];
-		int nv = vs[K( "length" )].as<int>() / 3, ni = is[K( "length" )].as<int>();
-		std::vector<b3Vec3> vertices( nv );
-		for ( int i = 0; i < nv; ++i )
-			vertices[i] = { vs[3 * i].as<float>(), vs[3 * i + 1].as<float>(), vs[3 * i + 2].as<float>() };
-		std::vector<int32_t> indices( ni );
-		for ( int i = 0; i < ni; ++i )
-			indices[i] = is[i].as<int32_t>();
-		std::vector<uint8_t> materials( ni / 3, 0 );
-		b3MeshDef md = {};
-		md.vertices = vertices.data();
-		md.indices = indices.data();
-		md.materialIndices = materials.data();
-		md.vertexCount = nv;
-		md.triangleCount = ni / 3;
-		md.useMedianSplit = true;
-		md.identifyEdges = true;
-		b3MeshData* mesh = b3CreateMesh( &md, nullptr, 0 );
+		b3MeshData* mesh = hasKey( opts, "cooked" ) ? (b3MeshData*)(uintptr_t)getInt( opts, "cooked", 0 ) : cookMeshData( opts );
 		if ( mesh == nullptr )
 		{
 			Shape shape = { b3_nullShapeId };
@@ -1824,37 +1888,13 @@ struct Body
 	// A height field from a flat array of heights, row by row: heights[z * countX + x]. The grid starts at the body's
 	// origin and spans (countX - 1) * scale.x along x and (countZ - 1) * scale.z along z. Heights are quantized to 16
 	// bits between globalMinimumHeight and globalMaximumHeight (default: the heights' own range). The shape keeps a
-	// pointer to the data, so the data lives as long as the module.
+	// pointer to the data: with `cooked`, the result of cookHeightField, which many shapes can share and whose owner frees
+	// it; without, data cooked here, which lives as long as the module.
 	Shape createHeightField( val opts )
 	{
 		b3ShapeDef def = shapeDefFromOpts( opts );
-		std::vector<float> heights = emscripten::convertJSArrayToNumberVector<float>( opts[K( "heights" )] );
-		b3HeightFieldDef hd = {};
-		hd.countX = getInt( opts, "countX", 0 );
-		hd.countZ = getInt( opts, "countZ", 0 );
-		if ( hd.countX < 2 || hd.countZ < 2 || (int)heights.size() != hd.countX * hd.countZ )
-		{
-			Shape shape = { b3_nullShapeId };
-			return shape;
-		}
-		float lo = heights[0], hi = heights[0];
-		for ( float h : heights )
-		{
-			lo = h < lo ? h : lo;
-			hi = h > hi ? h : hi;
-		}
-		std::vector<uint8_t> materials;
-		if ( hasKey( opts, "materialIndices" ) )
-		{
-			materials = emscripten::convertJSArrayToNumberVector<uint8_t>( opts[K( "materialIndices" )] );
-		}
-		hd.heights = heights.data();
-		hd.materialIndices = (int)materials.size() == ( hd.countX - 1 ) * ( hd.countZ - 1 ) ? materials.data() : nullptr;
-		hd.scale = getVec3( opts, "scale", { 1.0f, 1.0f, 1.0f } );
-		hd.globalMinimumHeight = getFloat( opts, "globalMinimumHeight", lo );
-		hd.globalMaximumHeight = getFloat( opts, "globalMaximumHeight", hi );
-		hd.clockwiseWinding = getBool( opts, "clockwiseWinding", false );
-		b3HeightFieldData* data = b3CreateHeightField( &hd );
+		b3HeightFieldData* data =
+			hasKey( opts, "cooked" ) ? (b3HeightFieldData*)(uintptr_t)getInt( opts, "cooked", 0 ) : cookHeightFieldData( opts );
 		if ( data == nullptr )
 		{
 			Shape shape = { b3_nullShapeId };
@@ -3053,6 +3093,10 @@ EMSCRIPTEN_BINDINGS( box3d )
 	constant( "maxWorkers", (int)B3_MAX_WORKERS );
 	function( "solvePlanes", &solvePlanes );
 	function( "clipVector", &clipVector );
+	function( "cookMesh", &cookMesh );
+	function( "freeMesh", &freeMesh );
+	function( "cookHeightField", &cookHeightField );
+	function( "freeHeightField", &freeHeightField );
 	function( "flatIn", &flatIn );
 	function( "flatOut", &flatOut );
 
@@ -3161,6 +3205,7 @@ EMSCRIPTEN_BINDINGS( box3d )
 		.function( "createMesh", &Guarded<&Body::createMesh>::call );
 
 	class_<Shape>( "Shape" )
+		.function( "getIndex", &Shape::getIndex )
 		.function( "isValid", &Shape::isValid )
 		.function( "destroy", &Shape::destroy )
 		.function( "getType", &Guarded<&Shape::getType>::call )

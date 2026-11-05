@@ -16,7 +16,8 @@ The binding adds to the upstream embind glue (`csrc/glue.cpp`):
 | `World.overlapShape(origin, { points, radius }, filter)` | `b3World_OverlapShape` (every shape) |
 | `World.closestPoint(target, maxDistance, filter)`, `Shape.getClosestPoint(target)` | the broadphase boxes within `maxDistance` (`b3World_OverlapAABB`), then `b3Shape_GetClosestPoint` per convex shape (meshes, height fields and compounds are left out: Box3D has no closest point on them) |
 | `World.castMover`, `World.collideMover`, `solvePlanes`, `clipVector` | `b3World_CastMover`, `b3World_CollideMover`, `b3SolvePlanes`, `b3ClipVector` |
-| `Body.createMesh({ vertices, indices })` | `b3CreateMesh`, `b3CreateMeshShape` |
+| `Body.createMesh({ vertices, indices })` or `({ cooked })` | `b3CreateMesh`, `b3CreateMeshShape` |
+| `cookMesh(opts)`, `freeMesh(cooked)`, `cookHeightField(opts)`, `freeHeightField(cooked)` | `b3CreateMesh`, `b3DestroyMesh`, `b3CreateHeightField`, `b3DestroyHeightField`: geometry many shapes share |
 | `Body.createHeightField({ heights, countX, countZ, scale, ... })` | `b3CreateHeightField`, `b3CreateHeightFieldShape` |
 | `World.getBodyMoveEvents()` | `b3World_GetBodyEvents` as typed arrays (`bodyIndex`, `userData`, `transform`, `fellAsleep`) |
 | `World.save()`, `World.restore(bytes)`, `World.getBody(index, generation)`, `Body.getIndex()`, `Body.getGeneration()` | `b3World_StartRecording`, `b3World_StopRecording`, `b3RecPlayer_Create` |
