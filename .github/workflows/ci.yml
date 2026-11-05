@@ -57,4 +57,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes "Built by CI from $GITHUB_SHA with emsdk 6.0.13."
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          gh release create "$GITHUB_REF_NAME" dist/* "$RUNNER_TEMP"/*.tgz --verify-tag --notes "Built by CI from $GITHUB_SHA with emsdk 6.0.13."
