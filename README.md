@@ -37,6 +37,8 @@ World queries leave sensor shapes out unless the filter has `includeSensors: tru
 The single-threaded flavours (`standard`, `scalar`) are `-Os` with LTO and read no clock inside a step: under Emscripten
 each read crosses into JavaScript, and Box3D's timing would otherwise cost much of a step on a phone. So `World.getProfile`
 is all zeros until `enableStepTimers(true)` is called, and Box3D's stall log is silent. `deluxe` keeps its timers and `-O3`.
+They also build Box3D without threads (`scripts/single-threaded/CMakeLists.txt`): Box3D adds `-pthread` to every
+Emscripten build of its own, and a library built so is not inlined into the binding, which made each body read four calls.
 
 [Box3D](https://github.com/erincatto/box3d) compiled to WebAssembly, with SIMD and optional wasm threads. Works in browsers and Node.js from a single package.
 

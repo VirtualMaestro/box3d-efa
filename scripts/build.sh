@@ -69,9 +69,19 @@ for FLAVOUR in $FLAVOURS; do
   fi
 
   echo "==> cmake ($FLAVOUR, $TARGET_TYPE)"
+  # The single-threaded flavours take Box3D as a subproject, so its top-level block that adds -pthread to every Emscripten
+  # build is skipped (scripts/single-threaded/CMakeLists.txt says why); their own build directory, as the source differs.
+  CMAKE_SRC="$BOX3D_SRC"
+  LIB_DIR="src"
+  if [ "$FLAVOUR" != "deluxe" ]; then
+    CMAKE_SRC="$DIR/single-threaded"
+    CMAKE_BUILD_DIR="$CMAKE_BUILD_DIR-sub"
+    LIB_DIR="box3d/src"
+  fi
   emcmake cmake \
-    -S "$BOX3D_SRC" \
+    -S "$CMAKE_SRC" \
     -B "$CMAKE_BUILD_DIR" \
+    -DBOX3D_SRC="$BOX3D_SRC" \
     -DCMAKE_BUILD_TYPE="$TARGET_TYPE" \
     -DCMAKE_C_FLAGS="${FLAVOUR_FLAGS[*]:-} $LTO_FLAGS" \
     -DCMAKE_C_FLAGS_RELEASE="$OPT_FLAGS -DNDEBUG" \
@@ -80,6 +90,7 @@ for FLAVOUR in $FLAVOURS; do
     -DBOX3D_BENCHMARKS=OFF \
     -DBOX3D_DOCS=OFF \
     -DBOX3D_VALIDATE=OFF \
+    -DBOX3D_PROFILE=OFF \
     -DBOX3D_DISABLE_SIMD="$DISABLE_SIMD" \
     > "$CMAKE_BUILD_DIR.cmake.log" 2>&1 || { cat "$CMAKE_BUILD_DIR.cmake.log" >&2; exit 1; }
 
@@ -87,7 +98,18 @@ for FLAVOUR in $FLAVOURS; do
   cmake --build "$CMAKE_BUILD_DIR" -j"$(nproc)" > "$CMAKE_BUILD_DIR.build.log" 2>&1 \
     || { tail -50 "$CMAKE_BUILD_DIR.build.log" >&2; exit 1; }
 
-  LIB="$CMAKE_BUILD_DIR/src/libbox3d.a"
+  LIB="$CMAKE_BUILD_DIR/$LIB_DIR/libbox3d.a"
+  # A threads flag in a single-threaded library would undo the above (Box3D may add one again some day).
+  # Each compile command's arguments, not its text (a path may hold "-pthread"); a database that cannot be read fails too.
+  if [ "$FLAVOUR" != "deluxe" ]; then
+    node -e '
+      const entries = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+      if (!Array.isArray(entries) || entries.length === 0) throw Error("no compile commands")
+      const threaded = entries.filter(e => (e.arguments ?? e.command.split(/\s+/)).some(a => a === "-pthread" || /^(-s)?USE_PTHREADS=1$/.test(a)))
+      if (threaded.length > 0) throw Error(`${threaded.length} files compiled with threads, first ${threaded[0].file}`)
+    ' "$CMAKE_BUILD_DIR/compile_commands.json" \
+      || { echo "the $FLAVOUR flavour must compile Box3D without threads; see scripts/single-threaded/CMakeLists.txt" >&2; exit 1; }
+  fi
   [ -f "$LIB" ] || { echo "missing $LIB" >&2; exit 1; }
 
   EMCC_OPTS=(
