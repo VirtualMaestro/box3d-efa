@@ -10,7 +10,7 @@ import { isMainThread, parentPort, Worker, workerData } from 'node:worker_thread
 // value the calls return compared. Set B3_REFERENCE to a folder with the reference (its box3d.scalar.mjs and .wasm);
 // without it the test is skipped. Build one from a worktree, for example of 8f045f2 (the glue before the faster
 // conversions): `git worktree add ../box3d-wasm-reference 8f045f2`, then `npm run fetch-deps` and
-// `FLAVOURS=scalar npm run build` there. B3_SEEDS sets the number of scenarios (default 40).
+// `FLAVOURS=scalar npm run build` there. B3_SEEDS sets the number of scenarios (default 40); B3_WIDE=1 runs the wide generator against the reference too (a reference with meshes, height fields and the integer conversions of 2026-11-03 or later).
 //
 // The generator varies how JS hands values to the glue (numbers, numeric strings, booleans, null, missing fields,
 // integers given as fractions) and keeps the geometry sane, so both builds take the same path through Box3D.
@@ -20,6 +20,7 @@ import { isMainThread, parentPort, Worker, workerData } from 'node:worker_thread
 
 const reference = process.env.B3_REFERENCE;
 const seeds = Number(process.env.B3_SEEDS ?? 40);
+const wideReference = process.env.B3_WIDE === '1';
 // A scenario runs in a worker: some leave Box3D unstable (it logs 'Box3D: unstable'), and a step can then spin.
 const limitMs = Number(process.env.B3_SCENARIO_MS ?? 10000);
 
@@ -292,7 +293,7 @@ if (!isMainThread) {
     let calls = 0, compared = 0;
     const unstable = [];
     for (let seed = 1; seed <= seeds; seed++) {
-      const [a, b] = await Promise.all([inWorker(now, seed), inWorker(ref, seed)]);
+      const [a, b] = await Promise.all([inWorker(now, seed, 'scalar', wideReference), inWorker(ref, seed, 'scalar', wideReference)]);
       if (a === 'hang' || b === 'hang') {
         assert.equal(a, b, `seed ${seed}: only one build hung (current: ${a === 'hang'}, reference: ${b === 'hang'})`);
         unstable.push(seed);
