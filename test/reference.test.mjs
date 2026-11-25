@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fork } from 'node:child_process';
 import { clearTimeout, setTimeout } from 'node:timers';
-import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
 
 // The object calls against a reference build, the files of a previous release on the same Box3D SHA: the same seeded scenarios on both modules, every
 // value the calls return compared. Set B3_REFERENCE to a folder with the reference (its box3d.scalar.mjs and .wasm);
 // without it the test is skipped. Build one from a worktree, for example of 8f045f2 (the glue before the faster
 // conversions): `git worktree add ../box3d-wasm-reference 8f045f2`, then `npm run fetch-deps` and
-// `FLAVOURS=scalar npm run build` there. B3_SEEDS sets the number of scenarios (default 40).
+// `FLAVOURS=scalar npm run build` there. B3_SEEDS sets the number of scenarios (default 40); B3_WIDE=1 runs the wide generator against the reference too (a reference with meshes, height fields and the integer conversions of 2026-11-03 or later).
 //
 // The generator varies how JS hands values to the glue (numbers, numeric strings, booleans, null, missing fields,
 // integers given as fractions) and keeps the geometry sane, so both builds take the same path through Box3D.
@@ -20,10 +20,17 @@ import { isMainThread, parentPort, Worker, workerData } from 'node:worker_thread
 
 const reference = process.env.B3_REFERENCE;
 const seeds = Number(process.env.B3_SEEDS ?? 40);
-// A scenario runs in a worker: some leave Box3D unstable (it logs 'Box3D: unstable'), and a step can then spin.
+const wideReference = process.env.B3_WIDE === '1';
+// A scenario runs in a child process: some leave Box3D unstable (it logs 'Box3D: unstable'), and a step can then spin. A
+// process, not a worker thread: ending a worker that holds the deluxe flavour's pthreads aborted the whole test run once on CI
+// (glibc's 'corrupted size vs. prev_size', d1ab8c6, 2026-11-24); a killed process takes nothing else with it.
 const limitMs = Number(process.env.B3_SCENARIO_MS ?? 10000);
 
-const load = async dir => (await import(pathToFileURL(join(dir, 'box3d.scalar.mjs')).href)).default({ wasmBinary: readFileSync(join(dir, 'box3d.scalar.wasm')) });
+// A flavour's files: standard (SIMD) box3d.mjs, scalar box3d.scalar.mjs, deluxe (threads) box3d.deluxe.mjs.
+const files = { standard: 'box3d', scalar: 'box3d.scalar', deluxe: 'box3d.deluxe' };
+const load = async (dir, flavour = 'scalar') => (await import(pathToFileURL(join(dir, `${files[flavour]}.mjs`)).href)).default({ wasmBinary: readFileSync(join(dir, `${files[flavour]}.wasm`)) });
+// The flavours compared with each other, the first against the rest (B3_FLAVOURS, default every flavour in dist).
+const flavours = (process.env.B3_FLAVOURS ?? 'scalar,standard,deluxe').split(',');
 
 /** mulberry32 */
 function prng(seed) {
@@ -47,8 +54,11 @@ function plain(v) {
   return v;
 }
 
-/** One scenario: every call and its result, in order. */
-function scenario(b3, seed) {
+/** One scenario: every call and its result, in order. `wide` adds what the reference build may not have or answers
+ * differently (the review of 2026-11-03, "What the differential generator does not cover"): static meshes and height
+ * fields, integers past 32 bits, negative and NaN filter bits, `maxDistance` from 0 to 1e6, shape getters. Compounds
+ * are not bound (no `createCompound`). The flavour test runs it; the reference test does not. */
+function scenario(b3, seed, wide = false) {
   const r = prng(seed);
   const log = [];
   const rec = (label, f) => {
@@ -83,7 +93,8 @@ function scenario(b3, seed) {
     const q = [r() - 0.5, r() - 0.5, r() - 0.5, r() - 0.5], n = Math.hypot(...q);
     return { x: q[0] / n, y: q[1] / n, z: q[2] / n, w: q[3] / n };
   };
-  const bits = () => pick([undefined, 1, 2, 3, 0xffff, 0xffffffff, 2 ** 40, '3', 0]);
+  const bits = () => wide && chance(0.4) ? pick([-1, -(2 ** 31), 2 ** 32, 2 ** 32 + 5, 2 ** 53, -(2 ** 53), NaN, Infinity, 1.5, 'x', '0x10']) : pick([undefined, 1, 2, 3, 0xffff, 0xffffffff, 2 ** 40, '3', 0]);
+  const group = () => wide && chance(0.3) ? pick([2 ** 31, -(2 ** 31) - 1, 2 ** 40, -(2 ** 40), 32767, -32768, 65536]) : int(-2, 3);
   const filterOpts = () => pick([undefined, null, {}, { maskBits: bits() }, { categoryBits: bits(), maskBits: bits(), includeSensors: flag() }]);
 
   const world = new b3.World({
@@ -111,9 +122,10 @@ function scenario(b3, seed) {
       const material = {
         density: num(0.2, 3), friction: num(0, 1), restitution: num(0, 0.8), rollingResistance: num(0, 0.2), tangentVelocity: chance(0.8) ? undefined : vec(-1, 1),
         isSensor: chance(0.1) ? true : undefined, enableSensorEvents: flag(), enableContactEvents: flag(), enableHitEvents: flag(), updateBodyMass: chance(0.9) ? undefined : flag(),
-        ...chance(0.3) ? { filter: { categoryBits: pick([1, 2, 4, '2']), maskBits: pick([0xffffffff, 1, 3, 2 ** 40]), groupIndex: int(-2, 3) } } : {},
+        ...chance(0.3) ? { filter: { categoryBits: wide ? bits() : pick([1, 2, 4, '2']), maskBits: wide ? bits() : pick([0xffffffff, 1, 3, 2 ** 40]), groupIndex: group() } } : {},
       };
-      const kind = pick(['box', 'boxHx', 'sphere', 'capsule', 'capsuleHeight', 'hull']);
+      // A mesh or a height field on a static body only (Box3D's are level geometry).
+      const kind = pick(wide && type === 'static' ? ['mesh', 'heightField', 'box', 'hull'] : ['box', 'boxHx', 'sphere', 'capsule', 'capsuleHeight', 'hull']);
       rec(`create ${kind}`, () => {
         let s;
         if (kind === 'box') s = body.createBox({ halfExtents: sizeVec(0.2, 1), ...chance(0.3) ? { offset: vec(-0.5, 0.5), rotation: quat() } : {}, ...material });
@@ -121,13 +133,23 @@ function scenario(b3, seed) {
         else if (kind === 'sphere') s = body.createSphere({ radius: real(0.2, 0.8), center: vec(-0.3, 0.3), ...material });
         else if (kind === 'capsule') s = body.createCapsule({ radius: real(0.1, 0.5), center1: { x: 0, y: -real(0.2, 0.6), z: 0 }, center2: { x: 0, y: real(0.2, 0.6), z: 0 }, ...material });
         else if (kind === 'capsuleHeight') s = body.createCapsule({ radius: real(0.1, 0.5), height: real(0.4, 1.2), ...material });
-        else {
+        else if (kind === 'mesh') {
+          // A bumpy grid of k x k quads, 1 to 2 m a side, both triangles facing up.
+          const k = 2 + Math.floor(r() * 3), side = real(1, 2), vertices = [], indices = [];
+          for (let z = 0; z <= k; z++) for (let x = 0; x <= k; x++) vertices.push((x - k / 2) * side, real(-0.3, 0.3), (z - k / 2) * side);
+          for (let z = 0; z < k; z++) for (let x = 0; x < k; x++) { const a = z * (k + 1) + x, b = a + 1, c = a + k + 1, d = c + 1; indices.push(a, c, b, b, c, d); }
+          s = body.createMesh({ vertices, indices, ...material });
+        } else if (kind === 'heightField') {
+          const countX = 2 + Math.floor(r() * 6), countZ = 2 + Math.floor(r() * 6), heights = [];
+          for (let i = 0; i < countX * countZ; i++) heights.push(real(-0.5, 0.5));
+          s = body.createHeightField({ heights, countX, countZ, scale: chance(0.7) ? { x: real(0.5, 2), y: real(0.5, 2), z: real(0.5, 2) } : undefined, ...material });
+        } else {
           const pts = [];
           for (let k = 0; k < 8; k++) pts.push({ x: real(-0.6, 0.6), y: real(-0.6, 0.6), z: real(-0.6, 0.6) });
           s = body.createHull({ points: pts, maxVertices: int(4, 9), ...material });
         }
         shapes.push(s);
-        return { type: s.getType(), density: s.getDensity(), friction: s.getFriction(), restitution: s.getRestitution(), sensor: s.isSensor(), filter: s.getFilter(), aabb: s.getAABB() };
+        return { type: s.getType(), density: s.getDensity(), friction: s.getFriction(), restitution: s.getRestitution(), sensor: s.isSensor(), filter: s.getFilter(), aabb: s.getAABB(), ...wide ? { valid: s.isValid() } : {} };
       });
     }
   }
@@ -170,7 +192,7 @@ function scenario(b3, seed) {
   ];
   const shapeSetters = [
     s => s.setFriction(real(0, 1)), s => s.setRestitution(real(0, 0.8)), s => s.setDensity(real(0.2, 3), true),
-    s => s.setFilter({ categoryBits: pick([1, 2, '4']), maskBits: pick([0xffffffff, 3, undefined]), groupIndex: int(-1, 2) }), s => s.enableContactEvents(chance(0.5)), s => s.enableHitEvents(chance(0.5)),
+    s => s.setFilter(wide ? { categoryBits: bits(), maskBits: bits(), groupIndex: group() } : { categoryBits: pick([1, 2, '4']), maskBits: pick([0xffffffff, 3, undefined]), groupIndex: int(-1, 2) }), s => s.enableContactEvents(chance(0.5)), s => s.enableHitEvents(chance(0.5)),
   ];
   const jointSetters = {
     setLength: () => real(0.5, 3), setSpringHertz: () => real(0, 8), setSpringDampingRatio: () => real(0, 2), setMotorSpeed: () => real(-2, 2), setTargetAngle: () => real(-1, 1),
@@ -230,7 +252,7 @@ function scenario(b3, seed) {
       const proxy = chance(0.5) ? { points: [vec(-0.2, 0.2)], radius: num(0.1, 0.6) } : { points: [{ x: 0, y: -0.4, z: 0 }, { x: 0, y: 0.4, z: 0 }], radius: num(0.1, 0.4) };
       rec(`cast ${step}`, () => world.castShape(vec(-8, 8), proxy, vec(-10, 10), filterOpts()));
       rec(`overlap ${step}`, () => world.overlapShape(vec(-6, 6), proxy, filterOpts()));
-      rec(`closest ${step}`, () => world.closestPoint(vec(-6, 6), num(0.5, 4), filterOpts()));
+      rec(`closest ${step}`, () => world.closestPoint(vec(-6, 6), wide ? pick([num(0, 50), 0, -1, 1e6]) : num(0.5, 4), filterOpts()));
       const at = { x: real(-6, 6), y: real(0.4, 3), z: real(-6, 6) }, cap = capsule(), f = filterOpts();
       rec(`mover ${step}`, () => {
         const planes = world.collideMover(at, cap, f);
@@ -241,7 +263,7 @@ function scenario(b3, seed) {
     }
     if (shapes.length) {
       const s = pick(shapes);
-      rec(`shape ${step}`, () => s.isValid() ? { cp: s.getClosestPoint(vec(-6, 6)), ray: s.rayCast(vec(-6, 6), vec(-10, 10)), contacts: s.getContactData() } : 'gone');
+      rec(`shape ${step}`, () => s.isValid() ? { cp: s.getClosestPoint(vec(-6, 6)), ray: s.rayCast(vec(-6, 6), vec(-10, 10)), contacts: s.getContactData(), ...wide ? { type: s.getType(), filter: s.getFilter(), aabb: s.getAABB(), friction: s.getFriction(), density: s.getDensity() } : {} } : 'gone');
     }
     if (chance(0.05) && bodies.length > 3) {
       // A live body only: the reference glue destroyed whatever held slot 0 on a second destroy.
@@ -254,26 +276,29 @@ function scenario(b3, seed) {
   return log;
 }
 
-/** One scenario on one build in a worker: its log, or 'hang' after limitMs. */
-function inWorker(dir, seed) {
+/** One scenario on one build in a child process: its log, or 'hang' after limitMs. */
+function inProcess(dir, seed, flavour = 'scalar', wide = false, limit = limitMs) {
   return new Promise((done, fail) => {
-    const w = new Worker(new URL(import.meta.url), { workerData: { dir, seed }, stderr: true });
-    const timer = setTimeout(() => { w.terminate(); done('hang'); }, limitMs);
-    w.once('message', log => { clearTimeout(timer); w.terminate(); done(log); });
-    w.once('error', e => { clearTimeout(timer); fail(e); });
+    const child = fork(fileURLToPath(import.meta.url), [], { env: { ...process.env, NODE_TEST_CONTEXT: undefined, B3_SCENARIO: JSON.stringify({ dir, seed, flavour, wide }) }, serialization: 'advanced' });
+    let settled = false;
+    const end = (f, v) => { if (settled) return; settled = true; clearTimeout(timer); child.kill('SIGKILL'); f(v); };
+    const timer = setTimeout(() => end(done, 'hang'), limit);
+    child.once('message', log => end(done, log));
+    child.once('error', e => end(fail, e));
+    child.once('exit', (code, signal) => end(fail, Error(`seed ${seed}, ${flavour}: the scenario's process ended (${signal ?? code}) before its log`)));
   });
 }
 
-if (!isMainThread) {
-  const m = await load(workerData.dir);
-  parentPort.postMessage(scenario(m, workerData.seed));
+if (process.env.B3_SCENARIO) {
+  const { dir, seed, flavour, wide } = JSON.parse(process.env.B3_SCENARIO);
+  process.send(scenario(await load(dir, flavour), seed, wide));
 } else {
   test('reference: the object calls answer as the reference build does', { skip: reference ? false : 'B3_REFERENCE not set' }, async () => {
     const now = resolve(import.meta.dirname, '../dist'), ref = resolve(reference);
     let calls = 0, compared = 0;
     const unstable = [];
     for (let seed = 1; seed <= seeds; seed++) {
-      const [a, b] = await Promise.all([inWorker(now, seed), inWorker(ref, seed)]);
+      const [a, b] = await Promise.all([inProcess(now, seed, 'scalar', wideReference), inProcess(ref, seed, 'scalar', wideReference)]);
       if (a === 'hang' || b === 'hang') {
         assert.equal(a, b, `seed ${seed}: only one build hung (current: ${a === 'hang'}, reference: ${b === 'hang'})`);
         unstable.push(seed);
@@ -286,5 +311,38 @@ if (!isMainThread) {
     assert.ok(compared >= seeds * 0.8, `only ${compared} of ${seeds} scenarios compared (both builds hung on ${unstable.join(', ')})`);
     assert.ok(calls > 1000 * compared, `only ${calls} calls`);
     console.log(`${compared} scenarios, ${calls} calls compared${unstable.length ? `; both builds hung on seeds ${unstable.join(', ')}` : ''}`);
+  });
+
+  // Every flavour of this dist against the first (scalar), on the wide generator: one glue, one Box3D, so every value
+  // the calls return is the same bit for bit (EFA's scenes found SIMD and scalar equal; this covers the binding's calls).
+  test('flavours: every flavour answers the object calls as the scalar one does', async () => {
+    const dir = resolve(import.meta.dirname, '../dist');
+    let calls = 0, compared = 0, threw = 0;
+    const unstable = [], made = {};
+    for (let seed = 1; seed <= seeds; seed++) {
+      const logs = await Promise.all(flavours.map(f => inProcess(dir, seed, f, true)));
+      // A hang is Box3D spinning, the same in every flavour; one only some hit is a slow run under load: those run again,
+      // alone, with three times the limit.
+      if (logs.includes('hang') && !logs.every(x => x === 'hang')) for (const [i, f] of flavours.entries()) if (logs[i] === 'hang') logs[i] = await inProcess(dir, seed, f, true, 3 * limitMs);
+      const hung = flavours.filter((_, i) => logs[i] === 'hang');
+      if (hung.length) {
+        assert.equal(hung.length, flavours.length, `seed ${seed}: only ${hung.join(', ')} hung`);
+        unstable.push(seed);
+        continue;
+      }
+      const [a] = logs;
+      // The wide cases reached, not only refused alike: a mesh and a height field made, a call that threw.
+      for (const [label, v] of a) {
+        if ((label === 'create mesh' || label === 'create heightField') && v?.valid === true) made[label] = (made[label] ?? 0) + 1;
+        if (typeof v === 'string' && v.startsWith('<threw')) threw++;
+      }
+      for (let k = 1; k < logs.length; k++) for (let i = 0; i < Math.max(a.length, logs[k].length); i++) assert.deepEqual(logs[k][i], a[i], `seed ${seed}, call ${i} (${a[i]?.[0]}): ${flavours[k]} against ${flavours[0]}`);
+      calls += a.length;
+      compared++;
+    }
+    assert.ok(compared >= seeds * 0.8, `only ${compared} of ${seeds} scenarios compared (every flavour hung on ${unstable.join(', ')})`);
+    assert.ok(calls > 1000 * compared, `only ${calls} calls`);
+    assert.ok(made['create mesh'] > 0 && made['create heightField'] > 0, `meshes and height fields made: ${JSON.stringify(made)}`);
+    console.log(`flavours ${flavours.join(', ')}: ${compared} scenarios, ${calls} calls each compared (made ${JSON.stringify(made)}, ${threw} calls threw)${unstable.length ? `; every flavour hung on seeds ${unstable.join(', ')}` : ''}`);
   });
 }
