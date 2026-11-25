@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fork } from 'node:child_process';
 import { clearTimeout, setTimeout } from 'node:timers';
-import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
 
 // The object calls against a reference build, the files of a previous release on the same Box3D SHA: the same seeded scenarios on both modules, every
 // value the calls return compared. Set B3_REFERENCE to a folder with the reference (its box3d.scalar.mjs and .wasm);
@@ -21,7 +21,9 @@ import { isMainThread, parentPort, Worker, workerData } from 'node:worker_thread
 const reference = process.env.B3_REFERENCE;
 const seeds = Number(process.env.B3_SEEDS ?? 40);
 const wideReference = process.env.B3_WIDE === '1';
-// A scenario runs in a worker: some leave Box3D unstable (it logs 'Box3D: unstable'), and a step can then spin.
+// A scenario runs in a child process: some leave Box3D unstable (it logs 'Box3D: unstable'), and a step can then spin. A
+// process, not a worker thread: ending a worker that holds the deluxe flavour's pthreads aborted the whole test run once on CI
+// (glibc's 'corrupted size vs. prev_size', d1ab8c6, 2026-11-24); a killed process takes nothing else with it.
 const limitMs = Number(process.env.B3_SCENARIO_MS ?? 10000);
 
 // A flavour's files: standard (SIMD) box3d.mjs, scalar box3d.scalar.mjs, deluxe (threads) box3d.deluxe.mjs.
@@ -274,26 +276,29 @@ function scenario(b3, seed, wide = false) {
   return log;
 }
 
-/** One scenario on one build in a worker: its log, or 'hang' after limitMs. */
-function inWorker(dir, seed, flavour = 'scalar', wide = false, limit = limitMs) {
+/** One scenario on one build in a child process: its log, or 'hang' after limitMs. */
+function inProcess(dir, seed, flavour = 'scalar', wide = false, limit = limitMs) {
   return new Promise((done, fail) => {
-    const w = new Worker(new URL(import.meta.url), { workerData: { dir, seed, flavour, wide }, stderr: true });
-    const timer = setTimeout(() => { w.terminate(); done('hang'); }, limit);
-    w.once('message', log => { clearTimeout(timer); w.terminate(); done(log); });
-    w.once('error', e => { clearTimeout(timer); fail(e); });
+    const child = fork(fileURLToPath(import.meta.url), [], { env: { ...process.env, NODE_TEST_CONTEXT: undefined, B3_SCENARIO: JSON.stringify({ dir, seed, flavour, wide }) }, serialization: 'advanced' });
+    let settled = false;
+    const end = (f, v) => { if (settled) return; settled = true; clearTimeout(timer); child.kill('SIGKILL'); f(v); };
+    const timer = setTimeout(() => end(done, 'hang'), limit);
+    child.once('message', log => end(done, log));
+    child.once('error', e => end(fail, e));
+    child.once('exit', (code, signal) => end(fail, Error(`seed ${seed}, ${flavour}: the scenario's process ended (${signal ?? code}) before its log`)));
   });
 }
 
-if (!isMainThread) {
-  const m = await load(workerData.dir, workerData.flavour);
-  parentPort.postMessage(scenario(m, workerData.seed, workerData.wide));
+if (process.env.B3_SCENARIO) {
+  const { dir, seed, flavour, wide } = JSON.parse(process.env.B3_SCENARIO);
+  process.send(scenario(await load(dir, flavour), seed, wide));
 } else {
   test('reference: the object calls answer as the reference build does', { skip: reference ? false : 'B3_REFERENCE not set' }, async () => {
     const now = resolve(import.meta.dirname, '../dist'), ref = resolve(reference);
     let calls = 0, compared = 0;
     const unstable = [];
     for (let seed = 1; seed <= seeds; seed++) {
-      const [a, b] = await Promise.all([inWorker(now, seed, 'scalar', wideReference), inWorker(ref, seed, 'scalar', wideReference)]);
+      const [a, b] = await Promise.all([inProcess(now, seed, 'scalar', wideReference), inProcess(ref, seed, 'scalar', wideReference)]);
       if (a === 'hang' || b === 'hang') {
         assert.equal(a, b, `seed ${seed}: only one build hung (current: ${a === 'hang'}, reference: ${b === 'hang'})`);
         unstable.push(seed);
@@ -315,10 +320,10 @@ if (!isMainThread) {
     let calls = 0, compared = 0, threw = 0;
     const unstable = [], made = {};
     for (let seed = 1; seed <= seeds; seed++) {
-      const logs = await Promise.all(flavours.map(f => inWorker(dir, seed, f, true)));
+      const logs = await Promise.all(flavours.map(f => inProcess(dir, seed, f, true)));
       // A hang is Box3D spinning, the same in every flavour; one only some hit is a slow run under load: those run again,
       // alone, with three times the limit.
-      if (logs.includes('hang') && !logs.every(x => x === 'hang')) for (const [i, f] of flavours.entries()) if (logs[i] === 'hang') logs[i] = await inWorker(dir, seed, f, true, 3 * limitMs);
+      if (logs.includes('hang') && !logs.every(x => x === 'hang')) for (const [i, f] of flavours.entries()) if (logs[i] === 'hang') logs[i] = await inProcess(dir, seed, f, true, 3 * limitMs);
       const hung = flavours.filter((_, i) => logs[i] === 'hang');
       if (hung.length) {
         assert.equal(hung.length, flavours.length, `seed ${seed}: only ${hung.join(', ')} hung`);
